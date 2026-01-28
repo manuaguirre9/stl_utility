@@ -1,0 +1,244 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { useStore } from '../../store/useStore';
+import { useIsMobile } from '../../utils/useIsMobile';
+import {
+    Play,
+    Pause,
+    SkipBack,
+    SkipForward,
+    ChevronLeft,
+    ChevronRight,
+    Scissors,
+    Grid3X3,
+    FilePlus,
+    FileMinus,
+    Settings2,
+    Home,
+    Undo2,
+    Redo2
+} from 'lucide-react';
+
+const getIconForAction = (label: string) => {
+    const l = label.toLowerCase();
+    if (l.includes('initial') || l.includes('start')) return <Home size={14} />;
+    if (l.includes('subdivide')) return <Scissors size={14} />;
+    if (l.includes('texturize')) return <Grid3X3 size={14} />;
+    if (l.includes('import')) return <FilePlus size={14} />;
+    if (l.includes('remove')) return <FileMinus size={14} />;
+    if (l.includes('edit') || l.includes('update')) return <Settings2 size={14} />;
+    return <Settings2 size={14} />;
+};
+
+export const HistoryTimeline: React.FC = () => {
+    const isMobile = useIsMobile();
+    const history = useStore((state) => state.history);
+    const historyIndex = useStore((state) => state.historyIndex);
+    const selectedHistoryId = useStore((state) => state.selectedHistoryId);
+    const setSelectedHistoryId = useStore((state) => state.setSelectedHistoryId);
+    const deleteHistoryEntry = useStore((state) => state.deleteHistoryEntry);
+    const jumpToHistory = useStore((state) => state.jumpToHistory);
+    const undo = useStore((state) => state.undo);
+    const redo = useStore((state) => state.redo);
+
+    const [isPlaying, setIsPlaying] = useState(false);
+    const playTimerRef = useRef<any>(null);
+
+    useEffect(() => {
+        if (isPlaying) {
+            playTimerRef.current = setInterval(() => {
+                const nextIndex = historyIndex + 1;
+                if (nextIndex < history.length) {
+                    jumpToHistory(nextIndex);
+                } else {
+                    setIsPlaying(false);
+                }
+            }, 800);
+        } else {
+            if (playTimerRef.current) clearInterval(playTimerRef.current);
+        }
+        return () => {
+            if (playTimerRef.current) clearInterval(playTimerRef.current);
+        };
+    }, [isPlaying, historyIndex, history.length, jumpToHistory]);
+
+    // Handle Delete key
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Delete' || e.key === 'Backspace') {
+                if (selectedHistoryId && selectedHistoryId !== 'initial') {
+                    deleteHistoryEntry(selectedHistoryId);
+                }
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [selectedHistoryId, deleteHistoryEntry]);
+
+    const stopPlayback = () => setIsPlaying(false);
+
+    return (
+        <div style={{
+            height: 'var(--timeline-height)',
+            backgroundColor: 'var(--bg-panel)',
+            borderTop: '2px solid var(--border-color)',
+            display: 'flex',
+            alignItems: 'center',
+            padding: isMobile ? '0 5px' : '0 10px',
+            zIndex: 10,
+            gap: isMobile ? '8px' : '15px'
+        }}>
+            {/* Playback Controls */}
+            <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '2px',
+                paddingRight: isMobile ? '8px' : '15px',
+                borderRight: '1px solid var(--border-color)',
+                height: '70%'
+            }}>
+                {!isMobile && (
+                    <button
+                        onClick={() => { stopPlayback(); jumpToHistory(0); }}
+                        style={controlButtonStyle}
+                        title="Rewind to beginning"
+                    >
+                        <SkipBack size={16} />
+                    </button>
+                )}
+                <button
+                    onClick={() => { stopPlayback(); jumpToHistory(Math.max(0, historyIndex - 1)); }}
+                    disabled={historyIndex === 0}
+                    style={controlButtonStyle}
+                    title="Step backward"
+                >
+                    <ChevronLeft size={isMobile ? 22 : 18} />
+                </button>
+                <button
+                    onClick={() => setIsPlaying(!isPlaying)}
+                    style={{
+                        ...controlButtonStyle,
+                        backgroundColor: isPlaying ? 'var(--accent-primary)' : 'var(--bg-input)',
+                        color: isPlaying ? 'white' : 'var(--text-primary)',
+                        padding: isMobile ? '8px' : '4px',
+                        minWidth: isMobile ? '36px' : '28px'
+                    }}
+                    title={isPlaying ? "Pause" : "Play"}
+                >
+                    {isPlaying ? <Pause size={isMobile ? 20 : 18} /> : <Play size={isMobile ? 20 : 18} />}
+                </button>
+                <button
+                    onClick={() => { stopPlayback(); redo(); }}
+                    disabled={historyIndex === history.length - 1}
+                    style={controlButtonStyle}
+                    title="Step forward"
+                >
+                    <ChevronRight size={isMobile ? 22 : 18} />
+                </button>
+                {!isMobile && (
+                    <button
+                        onClick={() => { stopPlayback(); jumpToHistory(history.length - 1); }}
+                        style={controlButtonStyle}
+                        title="Fast forward to end"
+                    >
+                        <SkipForward size={16} />
+                    </button>
+                )}
+            </div>
+
+            {/* Timeline Icons */}
+            <div style={{
+                flex: 1,
+                overflowX: 'auto',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                height: '100%',
+                scrollbarWidth: 'none',
+                WebkitOverflowScrolling: 'touch'
+            }}>
+                {history.map((entry, index) => {
+                    const isActive = index === historyIndex;
+                    const isSelected = entry.id === selectedHistoryId;
+                    const isFuture = index > historyIndex;
+
+                    return (
+                        <div
+                            key={entry.id}
+                            onClick={() => {
+                                stopPlayback();
+                                jumpToHistory(index);
+                                setSelectedHistoryId(entry.id);
+                            }}
+                            title={entry.label}
+                            style={{
+                                minWidth: isMobile ? '36px' : '32px',
+                                height: isMobile ? '36px' : '32px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                backgroundColor: isSelected ? 'var(--accent-primary)' : 'var(--bg-input)',
+                                borderRadius: 'var(--radius-sm)',
+                                cursor: 'pointer',
+                                color: isSelected ? 'white' : (isFuture ? 'var(--text-muted)' : 'var(--text-primary)'),
+                                border: isSelected ? (isActive ? '2px solid white' : '2px solid rgba(255,255,255,0.5)') : '1px solid var(--border-color)',
+                                opacity: isFuture ? 0.5 : 1,
+                                transition: 'all 0.1s ease',
+                                flexShrink: 0,
+                                transform: isSelected ? 'scale(1.05)' : 'none',
+                                boxShadow: isSelected ? '0 0 12px rgba(255,107,0,0.4)' : 'none',
+                                zIndex: isSelected ? 5 : 1
+                            }}
+                        >
+                            {getIconForAction(entry.label)}
+                        </div>
+                    );
+                })}
+            </div>
+
+            {/* Undo/Redo secondary buttons - Hidden on mobile as we have bigger arrows */}
+            {!isMobile && (
+                <div style={{
+                    display: 'flex',
+                    gap: '8px',
+                    paddingLeft: '15px',
+                    borderLeft: '1px solid var(--border-color)',
+                    height: '70%',
+                    alignItems: 'center'
+                }}>
+                    <button onClick={undo} disabled={historyIndex === 0} style={iconOnlyBtnStyle}>
+                        <Undo2 size={14} />
+                    </button>
+                    <button onClick={redo} disabled={historyIndex === history.length - 1} style={iconOnlyBtnStyle}>
+                        <Redo2 size={14} />
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+};
+
+const controlButtonStyle: React.CSSProperties = {
+    padding: '4px',
+    backgroundColor: 'transparent',
+    border: 'none',
+    borderRadius: '4px',
+    color: 'var(--text-primary)',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    transition: 'background-color 0.2s',
+    minWidth: '28px'
+};
+
+const iconOnlyBtnStyle: React.CSSProperties = {
+    padding: '4px',
+    backgroundColor: 'transparent',
+    border: '1px solid var(--border-color)',
+    borderRadius: '3px',
+    color: 'var(--text-muted)',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center'
+};
+
