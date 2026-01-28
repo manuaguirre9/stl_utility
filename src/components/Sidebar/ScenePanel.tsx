@@ -51,12 +51,19 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const suggestedPitches = React.useMemo(() => {
         if (circumference <= 0) return [];
         const suggestions = [];
-        // Show pitches that result in 20 to 80 divisions
-        for (let n = 20; n <= 80; n += 10) {
-            suggestions.push(circumference / n);
+        // Factor for diagonal pitch alignment
+        // For a square grid rotated by A, the horizontal projection of one repeat unit
+        // is P * (cos A + sin A)
+        const angRad = (angle * Math.PI) / 180;
+        const factor = Math.cos(angRad) + Math.sin(angRad);
+
+        // Show pitches that result in an integer number of divisions around the circumference
+        for (let n = 20; n <= 100; n += 10) {
+            const hPitch = circumference / n;
+            suggestions.push(hPitch / factor);
         }
         return suggestions;
-    }, [circumference]);
+    }, [circumference, angle]);
 
     return (
         <div style={{
@@ -333,18 +340,30 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                         </div>
                                         <div>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Angle (°)</label>
+                                                <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Knurling Angle</label>
                                                 <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '500' }}>{angle}°</span>
                                             </div>
-                                            <input
-                                                type="range"
-                                                min="0"
-                                                max="180"
-                                                step="5"
-                                                value={angle}
-                                                onChange={(e) => setAngle(parseFloat(e.target.value))}
-                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
-                                            />
+                                            <div style={{ display: 'flex', gap: '4px', marginBottom: '16px' }}>
+                                                {[0, 30, 45].map((a) => (
+                                                    <button
+                                                        key={a}
+                                                        onClick={() => setAngle(a)}
+                                                        style={{
+                                                            flex: 1,
+                                                            padding: '8px',
+                                                            fontSize: '11px',
+                                                            borderRadius: '4px',
+                                                            backgroundColor: angle === a ? 'var(--accent-primary)' : 'var(--bg-input)',
+                                                            color: 'white',
+                                                            border: '1px solid var(--border-color)',
+                                                            cursor: 'pointer',
+                                                            transition: 'all 0.2s'
+                                                        }}
+                                                    >
+                                                        {a === 0 ? 'Straight (0°)' : `${a}°`}
+                                                    </button>
+                                                ))}
+                                            </div>
                                         </div>
                                         <div>
                                             <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px' }}>Knurl Pattern</label>

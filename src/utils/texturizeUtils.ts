@@ -14,10 +14,9 @@ export function applyKnurling(
     faceIndices: number[],
     params: KnurlingParams
 ): THREE.BufferGeometry {
-    const { pitch: targetPitch, depth } = params;
+    const { pitch: targetPitch, depth, angle: userAngle } = params;
     const posAttr = geometry.attributes.position;
 
-    // 1. DATA COLLECTION
     const points: THREE.Vector3[] = [];
     const normals: THREE.Vector3[] = [];
     const centroids: THREE.Vector3[] = [];
@@ -33,129 +32,94 @@ export function applyKnurling(
 
     if (centroids.length === 0) return geometry;
 
-    // ROBUST AXIS DETECTION (Centered Covariance PCA)
-    // The axis of a revolution surface is the direction with minimum variance of normal projections
     const avgN = new THREE.Vector3(); normals.forEach(n => avgN.add(n)); avgN.divideScalar(normals.length);
     const avgN_norm = avgN.clone().normalize();
     let nVar = 0; normals.forEach(n => nVar += (1 - n.dot(avgN_norm))); nVar /= normals.length;
     const isPlanar = nVar < 0.01;
 
     let axis = new THREE.Vector3(1, 1, 1).normalize();
+    let axisOrigin = new THREE.Vector3();
+    let rStart_global = 0, rEnd_global = 0, depthSign_global = 1, m = 0, b = 0;
+
     if (!isPlanar) {
         let mxx = 0, mxy = 0, mxz = 0, myy = 0, myz = 0, mzz = 0;
         normals.forEach(n => {
             const dx = n.x - avgN.x, dy = n.y - avgN.y, dz = n.z - avgN.z;
             mxx += dx * dx; mxy += dx * dy; mxz += dx * dz; myy += dy * dy; myz += dy * dz; mzz += dz * dz;
         });
-        const tr = mxx + myy + mzz;
+        const trace = mxx + myy + mzz;
         for (let i = 0; i < 20; i++) {
-            const nx = (tr - mxx) * axis.x - mxy * axis.y - mxz * axis.z;
-            const ny = -mxy * axis.x + (tr - myy) * axis.y - myz * axis.z;
-            const nz = -mxz * axis.x - myz * axis.y + (tr - mzz) * axis.z;
+            const nx = (trace - mxx) * axis.x - mxy * axis.y - mxz * axis.z;
+            const ny = -mxy * axis.x + (trace - myy) * axis.y - myz * axis.z;
+            const nz = -mxz * axis.x - myz * axis.y + (trace - mzz) * axis.z;
             axis.set(nx, ny, nz).normalize();
         }
-    }
-
-    interface UVProjection {
-        project: (p: THREE.Vector3) => { u: number, v: number, h: number };
-        unproject: (u: number, v: number, h: number) => THREE.Vector3;
-        bounds: { uMin: number, uMax: number, vMin: number, vMax: number };
-        isFullCircle?: boolean;
-    }
-
-    let mapper: UVProjection;
-    let rStart_global = 0, rEnd_global = 0, depthSign_global = 1;
-
-    if (isPlanar) {
-        const upP = avgN.clone().normalize(), rightP = new THREE.Vector3();
-        if (Math.abs(upP.y) < 0.9) rightP.set(0, 1, 0).cross(upP).normalize(); else rightP.set(1, 0, 0).cross(upP).normalize();
-        const fwdP = new THREE.Vector3().crossVectors(rightP, upP).normalize();
-        const center = new THREE.Vector3(); centroids.forEach(c => center.add(c)); center.divideScalar(centroids.length);
-        mapper = {
-            project: (p) => { const v = p.clone().sub(center); return { u: v.dot(rightP), v: v.dot(fwdP), h: v.dot(upP) }; },
-            unproject: (u, v, h) => rightP.clone().multiplyScalar(u).add(fwdP.clone().multiplyScalar(v)).add(upP.clone().multiplyScalar(h)).add(center),
-            bounds: { uMin: 0, uMax: 0, vMin: 0, vMax: 0 }
-        };
-        let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
-        points.forEach(p => { const pr = mapper.project(p); uMin = Math.min(uMin, pr.u); uMax = Math.max(uMax, pr.u); vMin = Math.min(vMin, pr.v); vMax = Math.max(vMax, pr.v); });
-        mapper.bounds = { uMin, uMax, vMin, vMax };
-    } else {
         const up = axis, right = new THREE.Vector3();
         if (Math.abs(up.y) < 0.9) right.set(0, 1, 0).cross(up).normalize(); else right.set(1, 0, 0).cross(up).normalize();
         const fwd = new THREE.Vector3().crossVectors(up, right).normalize();
 
-        // 2D Origin Solver (Intersection of projected normal lines)
         let sUU = 0, sUV = 0, sVV = 0, bU = 0, bV = 0;
         centroids.forEach((q, idx) => {
             const n = normals[idx].clone().projectOnPlane(up).normalize();
             if (n.lengthSq() < 0.001) return;
             const qu = q.dot(right), qv = q.dot(fwd), nu = n.dot(right), nv = n.dot(fwd);
-            const a = 1 - nu * nu, b = -nu * nv, c = 1 - nv * nv;
-            sUU += a; sUV += b; sVV += c; bU += a * qu + b * qv; bV += b * qu + c * qv;
+            const aa = 1 - nu * nu, ab = -nu * nv, ac = 1 - nv * nv;
+            sUU += aa; sUV += ab; sVV += ac; bU += aa * qu + ab * qv; bV += ab * qu + ac * qv;
         });
         const det = sUU * sVV - sUV * sUV;
-        const axisOrigin = (Math.abs(det) > 1e-8)
-            ? right.clone().multiplyScalar((sVV * bU - sUV * bV) / det).add(fwd.clone().multiplyScalar((sUU * bV - sUV * bU) / det))
-            : centroids[0].clone();
+        axisOrigin = (Math.abs(det) > 1e-8) ? right.clone().multiplyScalar((sVV * bU - sUV * bV) / det).add(fwd.clone().multiplyScalar((sUU * bV - sUV * bU) / det)) : centroids[0].clone();
 
-        const pCyl = points.map(p => {
-            const v = p.clone().sub(axisOrigin);
-            return { h: v.dot(up), a: Math.atan2(v.dot(fwd), v.dot(right)), r: v.clone().projectOnPlane(up).length() };
-        });
-
-        // Slanted profile analysis (r = m*h + b)
-        let sumH = 0, sumR = 0, sumHH = 0, sumHR = 0, count = pCyl.length;
+        const pCyl = points.map(p => { const v = p.clone().sub(axisOrigin); return { h: v.dot(up), r: v.clone().projectOnPlane(up).length() }; });
+        let sumH = 0, sumR = 0, sumHH = 0, sumHR = 0, cnt = pCyl.length;
         pCyl.forEach(p => { sumH += p.h; sumR += p.r; sumHH += p.h * p.h; sumHR += p.h * p.r; });
-        const den = (count * sumHH - sumH * sumH);
-        const m = Math.abs(den) > 1e-9 ? (count * sumHR - sumH * sumR) / den : 0;
-        const b = (sumR - m * sumH) / count;
+        const den = (cnt * sumHH - sumH * sumH);
+        m = Math.abs(den) > 1e-9 ? (cnt * sumHR - sumH * sumR) / den : 0; b = (sumR - m * sumH) / cnt;
 
-        let hMin = Infinity, hMax = -Infinity, aMin = Infinity, aMax = -Infinity;
-        pCyl.forEach(p => { hMin = Math.min(hMin, p.h); hMax = Math.max(hMax, p.h); aMin = Math.min(aMin, p.a); aMax = Math.max(aMax, p.a); });
-        const isFull = (aMax - aMin) > 5.5; if (isFull) { aMin = -Math.PI; aMax = Math.PI; }
-        // hR calculation removed (unused)
-        rStart_global = m * hMin + b; rEnd_global = m * hMax + b;
-
-        // Unified Normal Analysis
         let nrSum = 0, nvSum = 0;
-        centroids.forEach((c, i) => {
-            const toS = c.clone().sub(axisOrigin).projectOnPlane(up).normalize();
-            nrSum += normals[i].dot(toS); nvSum += normals[i].dot(up);
-        });
-        const nLen = Math.sqrt(nrSum * nrSum + nvSum * nvSum);
-        const unitNR = nrSum / (nLen || 1), unitNV = nvSum / (nLen || 1);
-        depthSign_global = unitNR < 0 ? -1 : 1;
-
-        mapper = {
-            project: (p) => { const v = p.clone().sub(axisOrigin); return { u: Math.atan2(v.dot(fwd), v.dot(right)), v: v.dot(up), h: 0 }; },
-            unproject: (u, v, h) => {
-                const r = (m * v + b) + h * unitNR, hO = h * unitNV;
-                return right.clone().multiplyScalar(Math.cos(u) * r).add(fwd.clone().multiplyScalar(Math.sin(u) * r)).add(up.clone().multiplyScalar(v + hO)).add(axisOrigin);
-            },
-            bounds: { uMin: aMin, uMax: aMax, vMin: hMin, vMax: hMax }, isFullCircle: isFull
-        };
+        centroids.forEach((c, i) => { const toS = c.clone().sub(axisOrigin).projectOnPlane(up).normalize(); nrSum += normals[i].dot(toS); nvSum += normals[i].dot(up); });
+        const nLen = Math.sqrt(nrSum * nrSum + nvSum * nvSum); depthSign_global = (nrSum / (nLen || 1)) < 0 ? -1 : 1;
+        const hPoints = pCyl.map(p => p.h); const hMin = Math.min(...hPoints), hMax = Math.max(...hPoints);
+        rStart_global = m * hMin + b; rEnd_global = m * hMax + b;
     }
 
-    // 2. TILING
-    const uRange = mapper.bounds.uMax - mapper.bounds.uMin, vRange = mapper.bounds.vMax - mapper.bounds.vMin;
-    let physULen = isPlanar ? uRange : uRange * ((rStart_global + rEnd_global) / 2);
-    let physVLen = isPlanar ? vRange : Math.sqrt(vRange * vRange + (rEnd_global - rStart_global) ** 2);
-    let nD = Math.max(2, Math.min(1500, targetPitch > 1e-6 ? Math.round(physULen / targetPitch) : 2));
-    if (!isPlanar && mapper.isFullCircle && nD % 2 !== 0) nD++;
-    const mD = Math.max(1, Math.min(1500, targetPitch > 1e-6 ? Math.round(physVLen / targetPitch) : 1)), pU = uRange / nD, pV = vRange / mD;
+    const upDir = isPlanar ? avgN_norm : axis;
+    const rightDir = new THREE.Vector3();
+    if (Math.abs(upDir.y) < 0.9) rightDir.set(0, 1, 0).cross(upDir).normalize(); else rightDir.set(1, 0, 0).cross(upDir).normalize();
+    const fwdDir = new THREE.Vector3().crossVectors(upDir, rightDir).normalize();
+    const origin = isPlanar ? centroids.reduce((acc, c) => acc.add(c), new THREE.Vector3()).divideScalar(centroids.length) : axisOrigin;
 
-    // 3. GEOMETRY ENGINE
-    const newPos: number[] = [];
-    if (nD > 2000 || mD > 2000 || isNaN(nD) || isNaN(mD)) return geometry; // Extra safety bail
-    const origTriangles: { u: number, v: number }[][] = [];
-    for (let t = 0; t < points.length; t += 3) {
-        let pA = mapper.project(points[t]), pB = mapper.project(points[t + 1]), pC = mapper.project(points[t + 2]);
-        if (!isPlanar && mapper.isFullCircle && Math.max(pA.u, pB.u, pC.u) - Math.min(pA.u, pB.u, pC.u) > Math.PI) {
-            if (pA.u < 0) pA.u += 2 * Math.PI; if (pB.u < 0) pB.u += 2 * Math.PI; if (pC.u < 0) pC.u += 2 * Math.PI;
-        }
-        const area = (pB.u - pA.u) * (pC.v - pA.v) - (pB.v - pA.v) * (pC.u - pA.u);
-        origTriangles.push(area < 0 ? [pA, pC, pB] : [pA, pB, pC]);
-    }
+    // SEAMLESS UV LOGIC
+    const avgR = isPlanar ? 1 : (rStart_global + rEnd_global) / 2;
+    const circPhys = 2 * Math.PI * avgR;
+
+    const project = (p: THREE.Vector3) => {
+        const v = p.clone().sub(origin);
+        if (isPlanar) return { u: v.dot(rightDir), v: v.dot(fwdDir) };
+        let uRad = Math.atan2(v.dot(fwdDir), v.dot(rightDir));
+        if (uRad < 0) uRad += 2 * Math.PI;
+        return { u: uRad * avgR, v: v.dot(upDir) };
+    };
+
+    const unproject = (u: number, v: number, h: number) => {
+        const r = isPlanar ? 1 : (m * v + b) + h * depthSign_global;
+        if (isPlanar) return rightDir.clone().multiplyScalar(u).add(fwdDir.clone().multiplyScalar(v)).add(upDir.clone().multiplyScalar(h)).add(origin);
+        const ang = u / avgR;
+        const toS = rightDir.clone().multiplyScalar(Math.cos(ang)).add(fwdDir.clone().multiplyScalar(Math.sin(ang)));
+        return toS.multiplyScalar(r).add(upDir.clone().multiplyScalar(v)).add(origin);
+    };
+
+    // ROTATION & TILING
+    const angRad = (userAngle * Math.PI) / 180;
+    const cosA = Math.cos(angRad), sinA = Math.sin(angRad);
+    const toRot = (u: number, v: number) => ({ ur: u * cosA - v * sinA, vr: u * sinA + v * cosA });
+    const fromRot = (ur: number, vr: number) => ({ u: ur * cosA + vr * sinA, v: -ur * sinA + vr * cosA });
+
+    // Step adjustment for seamless wrap
+    const nD_nom = Math.round(circPhys / targetPitch);
+    const nD = Math.max(2, nD_nom % 2 === 0 ? nD_nom : nD_nom + 1);
+    const pitchP = circPhys / nD;
+    const factor = Math.cos(angRad) + Math.sin(angRad);
+    const pU = pitchP * factor, pV = pitchP * factor;
 
     const intersect = (a: any, b: any, e1: any, e2: any) => {
         const da = (e2.u - e1.u) * (a.v - e1.v) - (e2.v - e1.v) * (a.u - e1.u), db = (e2.u - e1.u) * (b.v - e1.v) - (e2.v - e1.v) * (b.u - e1.u);
@@ -172,27 +136,46 @@ export function applyKnurling(
         return out;
     };
 
-    origTriangles.forEach(tri => {
-        const iS = Math.floor((Math.min(tri[0].u, tri[1].u, tri[2].u) - mapper.bounds.uMin) / pU), iE = Math.ceil((Math.max(tri[0].u, tri[1].u, tri[2].u) - mapper.bounds.uMin) / pU);
-        const jS = Math.floor((Math.min(tri[0].v, tri[1].v, tri[2].v) - mapper.bounds.vMin) / pV), jE = Math.ceil((Math.max(tri[0].v, tri[1].v, tri[2].v) - mapper.bounds.vMin) / pV);
+    const newPos: number[] = [];
+    for (let t = 0; t < points.length; t += 3) {
+        let pA_uv = project(points[t]), pB_uv = project(points[t + 1]), pC_uv = project(points[t + 2]);
+
+        // SEAM WRAP CORRECTION
+        if (!isPlanar) {
+            const uVals = [pA_uv.u, pB_uv.u, pC_uv.u];
+            const minU = Math.min(...uVals), maxU = Math.max(...uVals);
+            if (maxU - minU > circPhys * 0.5) {
+                if (pA_uv.u < circPhys * 0.5) pA_uv.u += circPhys;
+                if (pB_uv.u < circPhys * 0.5) pB_uv.u += circPhys;
+                if (pC_uv.u < circPhys * 0.5) pC_uv.u += circPhys;
+            }
+        }
+
+        const pA = toRot(pA_uv.u, pA_uv.v), pB = toRot(pB_uv.u, pB_uv.v), pC = toRot(pC_uv.u, pC_uv.v);
+        const area = (pB.ur - pA.ur) * (pC.vr - pA.vr) - (pB.vr - pA.vr) * (pC.ur - pA.ur);
+        const tri = area < 0 ? [{ u: pA.ur, v: pA.vr }, { u: pC.ur, v: pC.vr }, { u: pB.ur, v: pB.vr }] : [{ u: pA.ur, v: pA.vr }, { u: pB.ur, v: pB.vr }, { u: pC.ur, v: pC.vr }];
+
+        const iS = Math.floor((Math.min(tri[0].u, tri[1].u, tri[2].u)) / pU) - 1, iE = Math.ceil((Math.max(tri[0].u, tri[1].u, tri[2].u)) / pU) + 1;
+        const jS = Math.floor((Math.min(tri[0].v, tri[1].v, tri[2].v)) / pV) - 1, jE = Math.ceil((Math.max(tri[0].v, tri[1].v, tri[2].v)) / pV) + 1;
+
         for (let j = jS; j <= jE; j++) {
             for (let i = iS; i <= iE; i++) {
-                const u0 = mapper.bounds.uMin + i * pU, u1 = mapper.bounds.uMin + (i + 1) * pU, v0 = mapper.bounds.vMin + j * pV, v1 = mapper.bounds.vMin + (j + 1) * pV;
+                const u0 = i * pU, u1 = (i + 1) * pU, v0 = j * pV, v1 = (j + 1) * pV;
                 const mid = { u: u0 + pU * 0.5, v: v0 + pV * 0.5, h: ((Math.abs(i) + Math.abs(j)) % 2 === 0) ? depth : 0 };
                 const cell = [[{ u: u0, v: v0, h: 0 }, { u: u1, v: v0, h: 0 }, mid], [{ u: u1, v: v0, h: 0 }, { u: u1, v: v1, h: 0 }, mid], [{ u: u1, v: v1, h: 0 }, { u: u0, v: v1, h: 0 }, mid], [{ u: u0, v: v1, h: 0 }, { u: u0, v: v0, h: 0 }, mid]];
                 cell.forEach(kTri => {
                     let poly = kTri; poly = clip(poly, tri[0], tri[1]); poly = clip(poly, tri[1], tri[2]); poly = clip(poly, tri[2], tri[0]);
                     if (poly.length >= 3) {
                         for (let v = 1; v < poly.length - 1; v++) {
-                            const p0 = mapper.unproject(poly[0].u, poly[0].v, poly[0].h), p1 = mapper.unproject(poly[v].u, poly[v].v, poly[v].h), p2 = mapper.unproject(poly[v + 1].u, poly[v + 1].v, poly[v + 1].h);
-                            if (depthSign_global < 0) newPos.push(p0.x, p0.y, p0.z, p2.x, p2.y, p2.z, p1.x, p1.y, p1.z);
-                            else newPos.push(p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z);
+                            const p0_u = fromRot(poly[0].u, poly[0].v), p1_u = fromRot(poly[v].u, poly[v].v), p2_u = fromRot(poly[v + 1].u, poly[v + 1].v);
+                            const vA = unproject(p0_u.u, p0_u.v, poly[0].h || 0), vB = unproject(p1_u.u, p1_u.v, poly[v].h || 0), vC = unproject(p2_u.u, p2_u.v, poly[v + 1].h || 0);
+                            newPos.push(vA.x, vA.y, vA.z, vB.x, vB.y, vB.z, vC.x, vC.y, vC.z);
                         }
                     }
                 });
             }
         }
-    });
+    }
 
     const finalR: number[] = []; const sel = new Set(faceIndices);
     for (let f = 0; f < posAttr.count / 3; f++) { if (!sel.has(f)) { for (let v = 0; v < 3; v++) { const idx = f * 3 + v; finalR.push(posAttr.getX(idx), posAttr.getY(idx), posAttr.getZ(idx)); } } }
@@ -218,9 +201,10 @@ function repairMesh(geo: THREE.BufferGeometry): THREE.BufferGeometry {
         }
     }
     if (bIdx.size > 0) {
-        const snapT = 0.05, positions = welded.attributes.position.array as Float32Array, grid = new Map<string, number>();
+        const snapT = 0.2, positions = welded.attributes.position.array as Float32Array, grid = new Map<string, number>();
         bIdx.forEach(idx => {
-            const x = positions[idx * 3], y = positions[idx * 3 + 1], z = positions[idx * 3 + 2], gx = Math.floor(x / snapT), gy = Math.floor(y / snapT), gz = Math.floor(z / snapT);
+            const x = positions[idx * 3], y = positions[idx * 3 + 1], z = positions[idx * 3 + 2];
+            const gx = Math.floor(x / snapT), gy = Math.floor(y / snapT), gz = Math.floor(z / snapT);
             let snapped = false;
             for (let dx = -1; dx <= 1 && !snapped; dx++) {
                 for (let dy = -1; dy <= 1 && !snapped; dy++) {
@@ -228,7 +212,10 @@ function repairMesh(geo: THREE.BufferGeometry): THREE.BufferGeometry {
                         const key = `${gx + dx},${gy + dy},${gz + dz}`;
                         if (grid.has(key)) {
                             const tIdx = grid.get(key)!; const tx = positions[tIdx * 3], ty = positions[tIdx * 3 + 1], tz = positions[tIdx * 3 + 2];
-                            if ((x - tx) ** 2 + (y - ty) ** 2 + (z - tz) ** 2 < snapT ** 2) { positions[idx * 3] = tx; positions[idx * 3 + 1] = ty; positions[idx * 3 + 2] = tz; snapped = true; }
+                            if ((x - tx) ** 2 + (y - ty) ** 2 + (z - tz) ** 2 < snapT ** 2) {
+                                positions[idx * 3] = tx; positions[idx * 3 + 1] = ty; positions[idx * 3 + 2] = tz;
+                                snapped = true;
+                            }
                         }
                     }
                 }
