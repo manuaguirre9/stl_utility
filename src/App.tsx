@@ -6,6 +6,7 @@ import { SceneView } from './components/Viewport/SceneView';
 import { HistoryTimeline } from './components/Timeline/HistoryTimeline';
 import { useStore } from './store/useStore';
 import { useIsMobile } from './utils/useIsMobile';
+import { Analytics } from '@vercel/analytics/react';
 import './styles/global.css';
 
 const App: React.FC = () => {
@@ -40,6 +41,7 @@ const App: React.FC = () => {
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden', backgroundColor: 'var(--bg-dark)' }}>
+      <Analytics />
       <TopBar onToggleSidebar={() => setSidebarOpen(!isSidebarOpen)} />
 
       <div style={{
