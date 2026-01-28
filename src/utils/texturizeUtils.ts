@@ -113,7 +113,7 @@ export function applyKnurling(
         let hMin = Infinity, hMax = -Infinity, aMin = Infinity, aMax = -Infinity;
         pCyl.forEach(p => { hMin = Math.min(hMin, p.h); hMax = Math.max(hMax, p.h); aMin = Math.min(aMin, p.a); aMax = Math.max(aMax, p.a); });
         const isFull = (aMax - aMin) > 5.5; if (isFull) { aMin = -Math.PI; aMax = Math.PI; }
-        const hR = hMax - hMin;
+        // hR calculation removed (unused)
         rStart_global = m * hMin + b; rEnd_global = m * hMax + b;
 
         // Unified Normal Analysis
