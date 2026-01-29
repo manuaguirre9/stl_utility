@@ -13,6 +13,8 @@ const App: React.FC = () => {
   const isMobile = useIsMobile();
   const undo = useStore((state) => state.undo);
   const redo = useStore((state) => state.redo);
+  const selectedHistoryIds = useStore((state) => state.selectedHistoryIds);
+  const deleteHistoryEntry = useStore((state) => state.deleteHistoryEntry);
   const [isSidebarOpen, setSidebarOpen] = React.useState(!isMobile);
 
   useEffect(() => {
@@ -22,6 +24,11 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't trigger if user is typing in an input
+      if (document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLTextAreaElement) {
+        return;
+      }
+
       if (e.ctrlKey || e.metaKey) {
         if (e.key === 'z') {
           if (e.shiftKey) {
@@ -32,12 +39,16 @@ const App: React.FC = () => {
         } else if (e.key === 'y') {
           redo();
         }
+      } else if (e.key === 'Delete') {
+        if (selectedHistoryIds.length > 0) {
+          deleteHistoryEntry(selectedHistoryIds);
+        }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undo, redo]);
+  }, [undo, redo, selectedHistoryIds, deleteHistoryEntry]);
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden', backgroundColor: 'var(--bg-dark)' }}>

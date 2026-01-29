@@ -1,8 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useStore } from '../../store/useStore';
 import type { KnurlPattern } from '../../utils/texturizeUtils';
 import { Eye, EyeOff, Box, Trash2, Scissors, Grid3X3, X, Info, RotateCcw } from 'lucide-react';
 import { estimateSelectionCircumference } from '../../utils/meshUtils';
+import { v4 as uuidv4 } from 'uuid';
+import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 
 interface ScenePanelProps {
     onClose?: () => void;
@@ -14,6 +16,7 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const selectModel = useStore((state) => state.selectModel);
     const updateModel = useStore((state) => state.updateModel);
     const removeModel = useStore((state) => state.removeModel);
+    const addModel = useStore((state) => state.addModel);
     const subdivideSelection = useStore((state) => state.subdivideSelection);
     const applyTexturize = useStore((state) => state.applyTexturize);
     const selectAllFaces = useStore((state) => state.selectAllFaces);
@@ -23,6 +26,7 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const selectedHistoryIds = useStore((state) => state.selectedHistoryIds);
     const recalculateHistoryItem = useStore((state) => state.recalculateHistoryItem);
 
+    const fileInputRef = useRef<HTMLInputElement>(null);
     const [subdivideSteps, setSubdivideSteps] = useState(1);
 
     // Texturize states
@@ -105,6 +109,45 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
         }
     };
 
+    const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+        const file = event.target.files?.[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const contents = e.target?.result as ArrayBuffer;
+            const loader = new STLLoader();
+            const geometry = loader.parse(contents);
+
+            geometry.computeBoundingSphere();
+            geometry.computeBoundingBox();
+
+            const sphere = geometry.boundingSphere;
+            const box = geometry.boundingBox;
+
+            if (!sphere || !box || isNaN(sphere.radius) || !isFinite(sphere.radius) || sphere.radius <= 0) {
+                alert("Invalid or corrupted STL file. Geometry bounds are infinite or zero.");
+                return;
+            }
+
+            geometry.center();
+
+            addModel({
+                id: uuidv4(),
+                name: file.name,
+                bufferGeometry: geometry,
+                color: '#ff6b00',
+                visible: true,
+                position: [0, 0, 0],
+                rotation: [0, 0, 0],
+                scale: [1, 1, 1],
+                meshVersion: 0,
+            });
+        };
+        reader.readAsArrayBuffer(file);
+        event.target.value = '';
+    };
+
     return (
         <div style={{
             width: 'var(--sidebar-width)',
@@ -120,10 +163,35 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
                     <h3 style={{ fontSize: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Scene Hierarchy</h3>
                     <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                        <button className="mobile-only" onClick={onClose} style={{ color: 'var(--text-muted)' }}>
+                        <button
+                            className="mobile-only"
+                            onClick={onClose}
+                            style={{ color: 'var(--text-muted)' }}
+                        >
                             <X size={16} />
                         </button>
-                        <button style={{ color: 'var(--accent-primary)', fontSize: '18px' }}>+</button>
+                        <input
+                            type="file"
+                            ref={fileInputRef}
+                            onChange={handleFileUpload}
+                            accept=".stl"
+                            style={{ display: 'none' }}
+                        />
+                        <button
+                            onClick={() => fileInputRef.current?.click()}
+                            style={{
+                                color: 'var(--accent-primary)',
+                                fontSize: '20px',
+                                fontWeight: 'bold',
+                                cursor: 'pointer',
+                                padding: '4px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center'
+                            }}
+                        >
+                            +
+                        </button>
                     </div>
                 </div>
 
