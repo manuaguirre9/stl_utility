@@ -55,6 +55,7 @@ interface AppState {
 
     // Re-edit State
     reEditParams: any | null;
+    preReEditIndex: number | null;
 
     // History Actions
     undo: () => void;
@@ -66,6 +67,7 @@ interface AppState {
     setSelectedHistoryIds: (ids: string[]) => void;
     setHistoryPreviewId: (id: string | null) => void;
     reEditHistoryItem: (index: number) => void;
+    recalculateHistoryItem: (id: string, newParams: any) => void;
 
     // Standard Actions
     addModel: (model: ModelData) => void;
@@ -118,8 +120,37 @@ export const useStore = create<AppState>((set, get) => ({
     historyIndex: 0,
     historyPreviewId: null,
     reEditParams: null,
+    preReEditIndex: null,
     selectedHistoryIds: ['initial'],
-    setSelectedHistoryIds: (ids) => set({ selectedHistoryIds: ids }),
+
+    setSelectedHistoryIds: (ids) => {
+        set({ selectedHistoryIds: ids });
+
+        // Auto-populate re-edit params if a tool-related action is selected
+        if (ids.length === 1) {
+            const entry = get().history.find(h => h.id === ids[0]);
+            if (entry && entry.id !== 'initial') {
+                const action = entry.action;
+                let toolMode: TransformMode = null;
+                let params: any = null;
+
+                if (action.type === 'SUBDIVIDE') {
+                    toolMode = 'subdivide'; params = { steps: action.steps };
+                } else if (action.type === 'TEXTURIZE_KNURLING') {
+                    toolMode = 'texturize'; params = { type: 'knurling', ...action.params };
+                } else if (action.type === 'TEXTURIZE_HONEYCOMB') {
+                    toolMode = 'texturize'; params = { type: 'honeycomb', ...action.params };
+                } else if (action.type === 'TEXTURIZE_DECIMATE') {
+                    toolMode = 'texturize'; params = { type: 'decimate', ...action.params };
+                }
+
+                if (toolMode) {
+                    set({ transformMode: toolMode, reEditParams: params });
+                }
+            }
+        }
+    },
+
     setHistoryPreviewId: (id) => set({ historyPreviewId: id }),
 
     recordHistory: (label, action) => {
@@ -244,13 +275,14 @@ export const useStore = create<AppState>((set, get) => ({
                 models: cloneModelsSnapshot(state.models),
                 smartSelection: JSON.parse(JSON.stringify(state.smartSelection)),
                 historyIndex: index,
-                selectedHistoryIds: [state.id]
+                selectedHistoryIds: [state.id],
+                preReEditIndex: null // Clear jump-back memory on manual navigation
             });
         }
     },
 
     reEditHistoryItem: (index) => {
-        const { history } = get();
+        const { history, historyIndex } = get();
         const entry = history[index];
         if (!entry || entry.id === 'initial') return;
 
@@ -275,14 +307,106 @@ export const useStore = create<AppState>((set, get) => ({
             set({
                 models: cloneModelsSnapshot(prevState.models),
                 smartSelection: { [modelId]: selection },
-                historyIndex: index - 1,
+                historyIndex: index, // Scrubber to the right of the item
                 selectedId: modelId,
                 transformMode: toolMode,
                 reEditParams: params,
-                history: history.slice(0, index),
-                selectedHistoryIds: [prevState.id]
+                selectedHistoryIds: [entry.id],
+                preReEditIndex: historyIndex // Save where we were
             });
         }
+    },
+
+    recalculateHistoryItem: (id, newParams) => {
+        const { history, historyIndex, preReEditIndex, selectedId } = get();
+        const editIndex = history.findIndex(h => h.id === id);
+        if (editIndex <= 0) return;
+
+        // Determine which index to restore to. 
+        // If we have a saved preReEditIndex, we go back there. 
+        // Otherwise we stay at the current historyIndex.
+        const originalScrubberIndex = preReEditIndex !== null ? preReEditIndex : historyIndex;
+
+        // 1. Prepare ALL actions for replay
+        const actionsToReplay = history.map((h) => {
+            if (h.id === id) {
+                const oldAction = h.action;
+                let updatedAction = { ...oldAction };
+                if (oldAction.type === 'SUBDIVIDE') {
+                    (updatedAction as any).steps = newParams.steps;
+                } else if (oldAction.type.startsWith('TEXTURIZE')) {
+                    (updatedAction as any).params = { ...newParams };
+                }
+                return { label: h.label, action: updatedAction };
+            }
+            return { label: h.label, action: h.action };
+        });
+
+        // 2. Re-apply everything from scratch
+        let currentModels: ModelData[] = [];
+        let currentSelection: Record<string, number[]> = {};
+        const rebuiltHistory: HistoryEntry[] = [];
+
+        actionsToReplay.forEach((item) => {
+            const action = item.action as any;
+            if (action.type === 'INITIAL') {
+                currentModels = [];
+                currentSelection = {};
+            } else if (action.type === 'IMPORT') {
+                currentModels = [...currentModels, { ...action.model, bufferGeometry: action.model.bufferGeometry.clone() }];
+            } else if (action.type === 'REMOVE') {
+                currentModels = currentModels.filter(m => m.id !== action.modelId);
+            } else if (action.type === 'UPDATE') {
+                currentModels = currentModels.map(m => m.id === action.modelId ? { ...m, ...action.data } : m);
+            } else if (action.type === 'SUBDIVIDE') {
+                const model = currentModels.find(m => m.id === action.modelId);
+                if (model) {
+                    model.bufferGeometry = subdivideSelectedFaces(model.bufferGeometry, action.selection, action.steps);
+                    model.meshVersion++;
+                }
+            } else if (action.type === 'TEXTURIZE_KNURLING') {
+                const model = currentModels.find(m => m.id === action.modelId);
+                if (model) {
+                    model.bufferGeometry = applyKnurling(model.bufferGeometry, action.selection, action.params);
+                    model.meshVersion++;
+                }
+            } else if (action.type === 'TEXTURIZE_HONEYCOMB') {
+                const model = currentModels.find(m => m.id === action.modelId);
+                if (model) {
+                    model.bufferGeometry = applyHoneycomb(model.bufferGeometry, action.selection, action.params);
+                    model.meshVersion++;
+                }
+            } else if (action.type === 'TEXTURIZE_DECIMATE') {
+                const model = currentModels.find(m => m.id === action.modelId);
+                if (model) {
+                    model.bufferGeometry = applyDecimate(model.bufferGeometry, action.selection, action.params);
+                    model.meshVersion++;
+                }
+            }
+
+            rebuiltHistory.push({
+                id: uuidv4(),
+                label: item.label,
+                action: action,
+                models: cloneModelsSnapshot(currentModels),
+                smartSelection: JSON.parse(JSON.stringify(currentSelection)),
+                timestamp: Date.now()
+            });
+        });
+
+        // 3. Restore User Context
+        const finalRestoreIndex = Math.min(originalScrubberIndex, rebuiltHistory.length - 1);
+        const restoredState = rebuiltHistory[finalRestoreIndex];
+
+        set({
+            history: rebuiltHistory,
+            historyIndex: finalRestoreIndex,
+            models: cloneModelsSnapshot(restoredState.models),
+            smartSelection: JSON.parse(JSON.stringify(restoredState.smartSelection)),
+            selectedHistoryIds: [rebuiltHistory[editIndex].id],
+            selectedId: selectedId,
+            preReEditIndex: null // Clear the memory
+        });
     },
 
     addModel: (model) => {
@@ -337,7 +461,6 @@ export const useStore = create<AppState>((set, get) => ({
         const selection = get().smartSelection[modelId] || [];
         if (selection.length === 0) return;
 
-        // Sort islands by min-index to be predictable
         const islands = getContiguousIslands(model.bufferGeometry, selection)
             .sort((a, b) => Math.min(...a) - Math.min(...b));
 
@@ -347,7 +470,6 @@ export const useStore = create<AppState>((set, get) => ({
         set({ smartSelection: { ...get().smartSelection, [modelId]: [] }, showMesh: true });
 
         islands.forEach((island, idx) => {
-            // Find current location of these original faces
             const translatedIsland = island.map(origIdx => {
                 let shift = 0;
                 processedOriginals.forEach(o => { if (o < origIdx) shift++; });

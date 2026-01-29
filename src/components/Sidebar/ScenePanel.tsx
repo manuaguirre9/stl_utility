@@ -1,8 +1,7 @@
-
 import React, { useState } from 'react';
 import { useStore } from '../../store/useStore';
 import type { KnurlPattern } from '../../utils/texturizeUtils';
-import { Eye, EyeOff, Box, Trash2, Scissors, Grid3X3, X, Info } from 'lucide-react';
+import { Eye, EyeOff, Box, Trash2, Scissors, Grid3X3, X, Info, RotateCcw } from 'lucide-react';
 import { estimateSelectionCircumference } from '../../utils/meshUtils';
 
 interface ScenePanelProps {
@@ -21,6 +20,8 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const smartSelection = useStore((state) => state.smartSelection);
     const transformMode = useStore((state) => state.transformMode);
     const reEditParams = useStore((state) => state.reEditParams);
+    const selectedHistoryIds = useStore((state) => state.selectedHistoryIds);
+    const recalculateHistoryItem = useStore((state) => state.recalculateHistoryItem);
 
     const [subdivideSteps, setSubdivideSteps] = useState(1);
 
@@ -52,16 +53,18 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
         }
     }, [reEditParams, transformMode]);
 
-
-
+    const isHistoryReEdit = selectedHistoryIds.length === 1 && selectedHistoryIds[0] !== 'initial' && reEditParams !== null;
     const selectedModel = models.find((m) => m.id === selectedId);
-    const selection = selectedId ? smartSelection[selectedId] || [] : [];
-    const hasSelection = selection.length > 0;
-    const selectionCount = selection.length;
-    const showSubdividePanel = transformMode === 'subdivide' && hasSelection;
-    const showTexturizePanel = transformMode === 'texturize' && hasSelection;
 
-    // Circumference estimation for seamless knurling
+    // In history re-edit mode, we might not have a face selection in the current live mesh, 
+    // but the button should still show if we are browsing history.
+    const selection = selectedId ? smartSelection[selectedId] || [] : [];
+    const selectionCount = selection.length;
+    const hasSelection = selectionCount > 0;
+
+    const showSubdividePanel = transformMode === 'subdivide' && (hasSelection || isHistoryReEdit);
+    const showTexturizePanel = transformMode === 'texturize' && (hasSelection || isHistoryReEdit);
+
     const circumference = React.useMemo(() => {
         if (!selectedModel || selection.length === 0) return 0;
         return estimateSelectionCircumference(selectedModel.bufferGeometry, selection);
@@ -70,19 +73,37 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const suggestedPitches = React.useMemo(() => {
         if (circumference <= 0) return [];
         const suggestions = [];
-        // Factor for diagonal pitch alignment
-        // For a square grid rotated by A, the horizontal projection of one repeat unit
-        // is P * (cos A + sin A)
         const angRad = (angle * Math.PI) / 180;
         const factor = Math.cos(angRad) + Math.sin(angRad);
-
-        // Show pitches that result in an integer number of divisions around the circumference
         for (let n = 20; n <= 100; n += 10) {
             const hPitch = circumference / n;
             suggestions.push(hPitch / factor);
         }
         return suggestions;
     }, [circumference, angle]);
+
+    const handleApply = () => {
+        if (isHistoryReEdit) {
+            // Recalculate existing operation
+            const params = transformMode === 'subdivide'
+                ? { steps: subdivideSteps }
+                : { type: textureType, pitch, depth, angle, pattern: knurlPattern, cellSize, wallThickness, reduction: reductionRatio };
+            recalculateHistoryItem(selectedHistoryIds[0], params);
+        } else if (selectedModel) {
+            // Apply new operation
+            if (transformMode === 'subdivide') {
+                subdivideSelection(selectedModel.id, subdivideSteps);
+            } else if (transformMode === 'texturize') {
+                if (textureType === 'knurling') {
+                    applyTexturize(selectedModel.id, { type: 'knurling', pitch, depth, angle, pattern: knurlPattern });
+                } else if (textureType === 'honeycomb') {
+                    applyTexturize(selectedModel.id, { type: 'honeycomb', cellSize, wallThickness, depth });
+                } else {
+                    applyTexturize(selectedModel.id, { type: 'decimate', reduction: reductionRatio });
+                }
+            }
+        }
+    };
 
     return (
         <div style={{
@@ -161,70 +182,75 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
             {/* Properties Panel */}
             {selectedModel && (
                 <div style={{ padding: 'var(--spacing-md)' }}>
-                    <h3 style={{ fontSize: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '16px' }}>Properties</h3>
-
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-
-                        <div>
-                            <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>Name</label>
-                            <input
-                                type="text"
-                                value={selectedModel.name}
-                                onChange={(e) => updateModel(selectedModel.id, { name: e.target.value })}
-                                style={{
-                                    width: '100%',
-                                    backgroundColor: 'var(--bg-input)',
-                                    border: '1px solid var(--border-color)',
-                                    color: 'var(--text-primary)',
-                                    padding: '6px 8px',
-                                    borderRadius: 'var(--radius-sm)',
-                                    fontSize: '13px'
-                                }}
-                            />
-                        </div>
-
-                        <div>
-                            <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>Color</label>
-                            <input
-                                type="color"
-                                value={selectedModel.color}
-                                onChange={(e) => updateModel(selectedModel.id, { color: e.target.value })}
-                                style={{
-                                    width: '100%',
-                                    height: '30px',
-                                    padding: '0',
-                                    border: '1px solid var(--border-color)',
-                                    borderRadius: 'var(--radius-sm)',
-                                    cursor: 'pointer'
-                                }}
-                            />
-                        </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                        <h3 style={{ fontSize: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
+                            {isHistoryReEdit ? 'Operation Re-edit' : 'Properties'}
+                        </h3>
+                        {isHistoryReEdit && (
+                            <span style={{ fontSize: '10px', color: '#ff6b00', fontWeight: 'bold', textTransform: 'uppercase' }}>Past Action</span>
+                        )}
                     </div>
+
+                    {!isHistoryReEdit && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                            <div>
+                                <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>Name</label>
+                                <input
+                                    type="text"
+                                    value={selectedModel.name}
+                                    onChange={(e) => updateModel(selectedModel.id, { name: e.target.value })}
+                                    style={{
+                                        width: '100%',
+                                        backgroundColor: 'var(--bg-input)',
+                                        border: '1px solid var(--border-color)',
+                                        color: 'var(--text-primary)',
+                                        padding: '6px 8px',
+                                        borderRadius: 'var(--radius-sm)',
+                                        fontSize: '13px'
+                                    }}
+                                />
+                            </div>
+                            <div>
+                                <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>Color</label>
+                                <input
+                                    type="color"
+                                    value={selectedModel.color}
+                                    onChange={(e) => updateModel(selectedModel.id, { color: e.target.value })}
+                                    style={{
+                                        width: '100%',
+                                        height: '30px',
+                                        padding: '0',
+                                        border: '1px solid var(--border-color)',
+                                        borderRadius: 'var(--radius-sm)',
+                                        cursor: 'pointer'
+                                    }}
+                                />
+                            </div>
+                        </div>
+                    )}
 
                     {/* Subdivide Tool Section */}
                     {showSubdividePanel && (
                         <div style={{
                             marginTop: '24px',
                             padding: '16px',
-                            backgroundColor: 'rgba(255, 107, 0, 0.05)',
+                            backgroundColor: isHistoryReEdit ? 'rgba(255, 107, 0, 0.1)' : 'rgba(255, 107, 0, 0.05)',
                             borderRadius: 'var(--radius-md)',
-                            border: '1px solid rgba(255, 107, 0, 0.2)'
+                            border: isHistoryReEdit ? '1px solid #ff6b00' : '1px solid rgba(255, 107, 0, 0.2)'
                         }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
-                                <div style={{ color: 'var(--accent-primary)' }}>
+                                <div style={{ color: isHistoryReEdit ? '#ff6b00' : 'var(--accent-primary)' }}>
                                     <Scissors size={18} />
                                 </div>
-                                <h3 style={{ fontSize: '14px', fontWeight: '600', color: 'var(--text-primary)' }}>Subdivide Tool</h3>
+                                <h3 style={{ fontSize: '14px', fontWeight: '600', color: 'var(--text-primary)' }}>
+                                    {isHistoryReEdit ? 'Re-calculate Subdivision' : 'Subdivide Tool'}
+                                </h3>
                             </div>
-
-                            <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '16px' }}>
-                                Refining the selection increases geometry density for better texture application.
-                            </p>
 
                             <div style={{ marginBottom: '16px' }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
                                     <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Steps</label>
-                                    <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '500' }}>{subdivideSteps}</span>
+                                    <span style={{ fontSize: '12px', color: isHistoryReEdit ? '#ff6b00' : 'var(--accent-primary)', fontWeight: '500' }}>{subdivideSteps}</span>
                                 </div>
                                 <input
                                     type="range"
@@ -233,16 +259,16 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                     step="1"
                                     value={subdivideSteps}
                                     onChange={(e) => setSubdivideSteps(parseInt(e.target.value))}
-                                    style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                    style={{ width: '100%', accentColor: isHistoryReEdit ? '#ff6b00' : 'var(--accent-primary)' }}
                                 />
                             </div>
 
                             <button
-                                onClick={() => subdivideSelection(selectedModel.id, subdivideSteps)}
+                                onClick={handleApply}
                                 style={{
                                     width: '100%',
                                     padding: '10px',
-                                    backgroundColor: 'var(--accent-primary)',
+                                    backgroundColor: isHistoryReEdit ? '#ff6b00' : 'var(--accent-primary)',
                                     color: 'white',
                                     borderRadius: 'var(--radius-sm)',
                                     display: 'flex',
@@ -251,11 +277,12 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                     gap: '8px',
                                     fontSize: '13px',
                                     border: 'none',
-                                    cursor: 'pointer'
+                                    cursor: 'pointer',
+                                    fontWeight: 'bold'
                                 }}
                             >
-                                <Scissors size={14} />
-                                Apply Subdivision
+                                {isHistoryReEdit ? <RotateCcw size={14} /> : <Scissors size={14} />}
+                                {isHistoryReEdit ? 'Recalculate & Reprocess' : 'Apply Subdivision'}
                             </button>
                         </div>
                     )}
@@ -265,15 +292,17 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                         <div style={{
                             marginTop: '24px',
                             padding: '16px',
-                            backgroundColor: 'rgba(0, 210, 255, 0.05)',
+                            backgroundColor: isHistoryReEdit ? 'rgba(0, 210, 255, 0.1)' : 'rgba(0, 210, 255, 0.05)',
                             borderRadius: 'var(--radius-md)',
-                            border: '1px solid rgba(0, 210, 255, 0.2)'
+                            border: isHistoryReEdit ? '1px solid #00d2ff' : '1px solid rgba(0, 210, 255, 0.2)'
                         }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
-                                <div style={{ color: 'var(--accent-primary)' }}>
+                                <div style={{ color: isHistoryReEdit ? '#00d2ff' : 'var(--accent-primary)' }}>
                                     <Grid3X3 size={18} />
                                 </div>
-                                <h3 style={{ fontSize: '14px', fontWeight: '600', color: 'var(--text-primary)' }}>Texturize Tool</h3>
+                                <h3 style={{ fontSize: '14px', fontWeight: '600', color: 'var(--text-primary)' }}>
+                                    {isHistoryReEdit ? 'Update Texture' : 'Texturize Tool'}
+                                </h3>
                             </div>
 
                             <div style={{ display: 'flex', gap: '4px', marginBottom: '16px', backgroundColor: 'var(--bg-input)', padding: '2px', borderRadius: '4px' }}>
@@ -286,7 +315,7 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                             padding: '6px',
                                             fontSize: '11px',
                                             borderRadius: '3px',
-                                            backgroundColor: textureType === t ? 'var(--accent-primary)' : 'transparent',
+                                            backgroundColor: textureType === t ? (isHistoryReEdit ? '#00d2ff' : 'var(--accent-primary)') : 'transparent',
                                             color: 'white',
                                             border: 'none',
                                             cursor: 'pointer',
@@ -298,10 +327,6 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                     </button>
                                 ))}
                             </div>
-
-                            <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '16px' }}>
-                                Applying <strong>{textureType}</strong> to {selectionCount} faces.
-                            </p>
 
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                                 {textureType === 'knurling' && (
@@ -320,42 +345,6 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                                 onChange={(e) => setPitch(parseFloat(e.target.value))}
                                                 style={{ width: '100%', accentColor: 'var(--accent-primary)', marginBottom: '12px' }}
                                             />
-
-                                            {circumference > 0 && (
-                                                <div style={{
-                                                    padding: '10px',
-                                                    backgroundColor: 'rgba(255,107,0,0.1)',
-                                                    borderRadius: '4px',
-                                                    border: '1px solid rgba(255,107,0,0.2)',
-                                                    marginBottom: '16px'
-                                                }}>
-                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px' }}>
-                                                        <Info size={12} color="var(--accent-primary)" />
-                                                        <span style={{ fontSize: '11px', fontWeight: 'bold' }}>Seamless Suggestions</span>
-                                                    </div>
-                                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                                                        {suggestedPitches.map((p, idx) => (
-                                                            <button
-                                                                key={idx}
-                                                                onClick={() => setPitch(p)}
-                                                                style={{
-                                                                    fontSize: '10px',
-                                                                    padding: '2px 6px',
-                                                                    backgroundColor: 'var(--bg-input)',
-                                                                    border: Math.abs(pitch - p) < 0.05 ? '1px solid var(--accent-primary)' : '1px solid transparent',
-                                                                    borderRadius: '2px',
-                                                                    color: 'var(--text-secondary)'
-                                                                }}
-                                                            >
-                                                                {p.toFixed(2)}
-                                                            </button>
-                                                        ))}
-                                                    </div>
-                                                    <p style={{ fontSize: '9px', color: 'var(--text-muted)', marginTop: '8px' }}>
-                                                        Est. Perimeter: {circumference.toFixed(1)}mm.
-                                                    </p>
-                                                </div>
-                                            )}
                                         </div>
                                         <div>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
@@ -372,14 +361,13 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                                             padding: '8px',
                                                             fontSize: '11px',
                                                             borderRadius: '4px',
-                                                            backgroundColor: angle === a ? 'var(--accent-primary)' : 'var(--bg-input)',
+                                                            backgroundColor: angle === a ? (isHistoryReEdit ? '#00d2ff' : 'var(--accent-primary)') : 'var(--bg-input)',
                                                             color: 'white',
                                                             border: '1px solid var(--border-color)',
-                                                            cursor: 'pointer',
-                                                            transition: 'all 0.2s'
+                                                            cursor: 'pointer'
                                                         }}
                                                     >
-                                                        {a === 0 ? 'Straight (0°)' : `${a}°`}
+                                                        {a === 0 ? 'Straight' : `${a}°`}
                                                     </button>
                                                 ))}
                                             </div>
@@ -393,18 +381,15 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                                     width: '100%',
                                                     backgroundColor: 'var(--bg-input)',
                                                     border: '1px solid var(--border-color)',
-                                                    color: 'var(--text-primary)',
+                                                    color: 'white',
                                                     padding: '8px',
-                                                    borderRadius: 'var(--radius-sm)',
-                                                    fontSize: '13px',
-                                                    outline: 'none',
-                                                    cursor: 'pointer'
+                                                    borderRadius: '4px'
                                                 }}
                                             >
-                                                <option value="diamond">Diamond (Cross-Cut)</option>
-                                                <option value="straight">Straight (Parallel)</option>
-                                                <option value="diagonal">Diagonal (Single)</option>
-                                                <option value="square">Square (Grid)</option>
+                                                <option value="diamond">Diamond</option>
+                                                <option value="straight">Straight</option>
+                                                <option value="diagonal">Diagonal</option>
+                                                <option value="square">Square</option>
                                             </select>
                                         </div>
                                     </>
@@ -414,7 +399,7 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                     <>
                                         <div>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Cell Size (mm)</label>
+                                                <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Cell Size</label>
                                                 <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '500' }}>{cellSize}</span>
                                             </div>
                                             <input
@@ -426,44 +411,6 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                                 onChange={(e) => setCellSize(parseFloat(e.target.value))}
                                                 style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
                                             />
-                                        </div>
-                                        <div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Wall Thickness (mm)</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '500' }}>{wallThickness}</span>
-                                            </div>
-                                            <input
-                                                type="range"
-                                                min="0.1"
-                                                max="5"
-                                                step="0.1"
-                                                value={wallThickness}
-                                                onChange={(e) => setWallThickness(parseFloat(e.target.value))}
-                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
-                                            />
-                                        </div>
-                                    </>
-                                )}
-
-                                {textureType === 'decimate' && (
-                                    <>
-                                        <div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Reduction Intensity</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '500' }}>{Math.round(reductionRatio * 100)}%</span>
-                                            </div>
-                                            <input
-                                                type="range"
-                                                min="0.1"
-                                                max="0.95"
-                                                step="0.05"
-                                                value={reductionRatio}
-                                                onChange={(e) => setReductionRatio(parseFloat(e.target.value))}
-                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
-                                            />
-                                            <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '8px' }}>
-                                                Higher intensity collapses more vertices into single points.
-                                            </p>
                                         </div>
                                     </>
                                 )}
@@ -485,32 +432,22 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                 </div>
 
                                 <button
-                                    onClick={() => {
-                                        if (textureType === 'knurling') {
-                                            applyTexturize(selectedModel.id, { type: 'knurling', pitch, depth, angle, pattern: knurlPattern });
-                                        } else if (textureType === 'honeycomb') {
-                                            applyTexturize(selectedModel.id, { type: 'honeycomb', cellSize, wallThickness, depth });
-                                        } else {
-                                            applyTexturize(selectedModel.id, { type: 'decimate', reduction: reductionRatio });
-                                        }
-                                    }}
+                                    onClick={handleApply}
                                     style={{
                                         width: '100%',
                                         padding: '12px',
-                                        backgroundColor: 'var(--accent-primary)',
+                                        backgroundColor: isHistoryReEdit ? '#00d2ff' : 'var(--accent-primary)',
                                         color: 'white',
                                         border: 'none',
                                         borderRadius: 'var(--radius-sm)',
                                         cursor: 'pointer',
-                                        fontWeight: '600',
+                                        fontWeight: 'bold',
                                         fontSize: '13px',
-                                        transition: 'all 0.2s ease',
                                         marginTop: '16px'
                                     }}
-                                    onMouseEnter={(e) => e.currentTarget.style.filter = 'brightness(1.1)'}
-                                    onMouseLeave={(e) => e.currentTarget.style.filter = 'none'}
                                 >
-                                    Apply Texture
+                                    {isHistoryReEdit ? <RotateCcw size={14} style={{ marginRight: '8px' }} /> : null}
+                                    {isHistoryReEdit ? 'Recalculate & Redo' : 'Apply Texture'}
                                 </button>
                             </div>
                         </div>

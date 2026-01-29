@@ -21,6 +21,7 @@ const Model = ({ model }: { model: any }) => {
     const selection = useStore((state) => state.smartSelection[model.id] || EMPTY_ARRAY);
 
     const historyPreviewId = useStore((state) => state.historyPreviewId);
+    const selectedHistoryIds = useStore((state) => state.selectedHistoryIds);
     const history = useStore((state) => state.history);
 
     // Derived geometry for highlight
@@ -30,8 +31,11 @@ const Model = ({ model }: { model: any }) => {
     }, [model.bufferGeometry, selection]);
 
     const previewGeo = React.useMemo(() => {
-        if (!historyPreviewId) return null;
-        const entryIdx = history.findIndex(h => h.id === historyPreviewId);
+        // Hover takes priority, fallback to last selected history item
+        const activeId = historyPreviewId || (selectedHistoryIds.length > 0 ? selectedHistoryIds[selectedHistoryIds.length - 1] : null);
+        if (!activeId) return null;
+
+        const entryIdx = history.findIndex(h => h.id === activeId);
         if (entryIdx <= 0) return null;
 
         const entry = history[entryIdx];
@@ -50,7 +54,7 @@ const Model = ({ model }: { model: any }) => {
         } catch (e) {
             return null;
         }
-    }, [historyPreviewId, history, model.id]);
+    }, [historyPreviewId, selectedHistoryIds, history, model.id]);
 
     // Derived segmentation data for both visualization and smart selection
     const segmentation = React.useMemo(() => {
@@ -141,7 +145,7 @@ const Model = ({ model }: { model: any }) => {
             {previewGeo && (
                 <mesh geometry={previewGeo.geometry} renderOrder={0.8}>
                     <meshBasicMaterial
-                        color="#00d2ff"
+                        color="#ffcc00"
                         side={THREE.DoubleSide}
                         polygonOffset
                         polygonOffsetFactor={0.2}
@@ -205,6 +209,7 @@ export const SceneView: React.FC = () => {
     const setClassificationAngle = useStore((state) => state.setClassificationAngle);
     const transformMode = useStore((state) => state.transformMode);
     const clearSmartSelection = useStore((state) => state.clearSmartSelection);
+    const setSelectedHistoryIds = useStore((state) => state.setSelectedHistoryIds);
     const orbitControlsRef = React.useRef<any>(null);
 
     const [isLegendExpanded, setIsLegendExpanded] = useState(!isMobile);
@@ -291,6 +296,7 @@ export const SceneView: React.FC = () => {
                     if (e.button !== 0) return; // Only clear on left click
                     selectModel(null);
                     clearSmartSelection();
+                    setSelectedHistoryIds(['initial']);
                 }}
             >
                 <ambientLight intensity={0.5} />
