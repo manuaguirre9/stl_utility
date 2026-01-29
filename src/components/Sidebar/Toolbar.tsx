@@ -1,6 +1,6 @@
 import React, { useRef } from 'react';
 import { useStore } from '../../store/useStore';
-import { Trash2, Upload, Download, MousePointerClick, Scissors, Grid3X3 } from 'lucide-react';
+import { Trash2, Upload, Download, MousePointerClick, Scissors, Grid3X3, Diamond, Hexagon, Minimize2 } from 'lucide-react';
 import { exportSceneToSTL } from '../../utils/exportUtils';
 import { v4 as uuidv4 } from 'uuid';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
@@ -12,6 +12,8 @@ export const Toolbar: React.FC = () => {
     const addModel = useStore((state) => state.addModel);
     const transformMode = useStore((state) => state.transformMode);
     const setTransformMode = useStore((state) => state.setTransformMode);
+    const textureType = useStore((state) => state.textureType);
+    const setTextureType = useStore((state) => state.setTextureType);
     const selectedId = useStore((state) => state.selectedId);
     const models = useStore((state) => state.models);
     const removeModel = useStore((state) => state.removeModel);
@@ -62,30 +64,36 @@ export const Toolbar: React.FC = () => {
         active,
         onClick,
         icon: Icon,
-        primary = false
+        primary = false,
+        small = false,
+        title = ""
     }: {
         active?: boolean;
         onClick: () => void;
         icon: React.ElementType<{ size?: number | string }>;
-        primary?: boolean
+        primary?: boolean;
+        small?: boolean;
+        title?: string
     }) => (
         <button
             onClick={onClick}
+            title={title}
             style={{
-                width: isMobile ? '36px' : '40px',
-                height: isMobile ? '36px' : '40px',
+                width: small ? (isMobile ? '30px' : '32px') : (isMobile ? '36px' : '40px'),
+                height: small ? (isMobile ? '30px' : '32px') : (isMobile ? '36px' : '40px'),
                 borderRadius: 'var(--radius-md)',
                 backgroundColor: primary ? 'var(--accent-primary)' : (active ? 'var(--bg-hover)' : 'transparent'),
-                color: primary ? '#fff' : (active ? '#fff' : 'var(--text-secondary)'),
+                color: primary ? '#fff' : (active ? 'var(--accent-primary)' : 'var(--text-secondary)'),
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                marginBottom: isMobile ? '0' : '8px',
-                marginRight: isMobile ? '8px' : '0',
+                marginBottom: isMobile ? '0' : (small ? '4px' : '8px'),
+                marginRight: isMobile ? (small ? '4px' : '8px') : '0',
                 transition: 'all 0.2s ease',
+                border: active && !primary ? '1px solid var(--accent-primary)' : '1px solid transparent',
             }}
         >
-            <Icon size={isMobile ? 18 : 20} />
+            <Icon size={small ? (isMobile ? 14 : 16) : (isMobile ? 18 : 20)} />
         </button>
     );
 
@@ -114,12 +122,14 @@ export const Toolbar: React.FC = () => {
             <ToolButton
                 primary
                 icon={Upload}
+                title="Import STL"
                 onClick={() => fileInputRef.current?.click()}
             />
 
             <ToolButton
                 primary
                 icon={Download}
+                title="Export STL"
                 onClick={() => exportSceneToSTL(models)}
             />
 
@@ -129,23 +139,68 @@ export const Toolbar: React.FC = () => {
             <ToolButton
                 active={transformMode === 'smart'}
                 icon={MousePointerClick}
+                title="Smart Select"
                 onClick={() => setTransformMode('smart')}
             />
             <ToolButton
                 active={transformMode === 'subdivide'}
                 icon={Scissors}
+                title="Subdivide"
                 onClick={() => setTransformMode('subdivide')}
             />
-            <ToolButton
-                active={transformMode === 'texturize'}
-                icon={Grid3X3}
-                onClick={() => setTransformMode('texturize')}
-            />
+
+            <div style={{ display: 'flex', flexDirection: isMobile ? 'row' : 'column', alignItems: 'center' }}>
+                <ToolButton
+                    active={transformMode === 'texturize'}
+                    icon={Grid3X3}
+                    title="Texturize Tools"
+                    onClick={() => setTransformMode('texturize')}
+                />
+
+                {transformMode === 'texturize' && (
+                    <div style={{
+                        display: 'flex',
+                        flexDirection: isMobile ? 'row' : 'column',
+                        gap: '2px',
+                        padding: '4px',
+                        backgroundColor: 'var(--bg-panel-light)',
+                        borderRadius: 'var(--radius-md)',
+                        border: '1px solid var(--border-color)',
+                        marginTop: isMobile ? '0' : '4px',
+                        marginLeft: isMobile ? '4px' : '0',
+                        boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
+                        animation: 'fadeIn 0.2s ease'
+                    }}>
+                        <ToolButton
+                            small
+                            active={textureType === 'knurling'}
+                            onClick={() => setTextureType('knurling')}
+                            icon={Diamond}
+                            title="Knurling"
+                        />
+                        <ToolButton
+                            small
+                            active={textureType === 'honeycomb'}
+                            onClick={() => setTextureType('honeycomb')}
+                            icon={Hexagon}
+                            title="Honeycomb"
+                        />
+                        <ToolButton
+                            small
+                            active={textureType === 'decimate'}
+                            onClick={() => setTextureType('decimate')}
+                            icon={Minimize2}
+                            title="Simplify"
+                        />
+                    </div>
+                )}
+            </div>
 
             {!isMobile && <div style={{ height: '10px', marginTop: 'auto' }} />}
 
             <ToolButton
                 icon={Trash2}
+                title="Remove Model"
                 onClick={() => selectedId && removeModel(selectedId)}
             />
         </div>

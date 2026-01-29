@@ -47,6 +47,7 @@ interface AppState {
     showClassification: boolean;
     classificationAngle: number;
     smartSelection: Record<string, number[]>;
+    textureType: 'knurling' | 'honeycomb' | 'decimate';
 
     // History State
     history: HistoryEntry[];
@@ -83,6 +84,7 @@ interface AppState {
     addToSmartSelection: (modelId: string, indices: number[]) => void;
     removeFromSmartSelection: (modelId: string, indices: number[]) => void;
     clearSmartSelection: () => void;
+    setTextureType: (type: 'knurling' | 'honeycomb' | 'decimate') => void;
     subdivideSelection: (modelId: string, steps: number) => void;
     applyTexturize: (modelId: string, params:
         | { type: 'knurling', pitch: number, depth: number, angle: number, pattern: KnurlPattern }
@@ -108,6 +110,7 @@ export const useStore = create<AppState>((set, get) => ({
     showClassification: false,
     classificationAngle: 20,
     smartSelection: {},
+    textureType: 'knurling',
 
     history: [{
         id: 'initial',
@@ -138,10 +141,13 @@ export const useStore = create<AppState>((set, get) => ({
                     toolMode = 'subdivide'; params = { steps: action.steps };
                 } else if (action.type === 'TEXTURIZE_KNURLING') {
                     toolMode = 'texturize'; params = { type: 'knurling', ...action.params };
+                    set({ textureType: 'knurling' });
                 } else if (action.type === 'TEXTURIZE_HONEYCOMB') {
                     toolMode = 'texturize'; params = { type: 'honeycomb', ...action.params };
+                    set({ textureType: 'honeycomb' });
                 } else if (action.type === 'TEXTURIZE_DECIMATE') {
                     toolMode = 'texturize'; params = { type: 'decimate', ...action.params };
+                    set({ textureType: 'decimate' });
                 }
 
                 if (toolMode) {
@@ -297,10 +303,13 @@ export const useStore = create<AppState>((set, get) => ({
             toolMode = 'subdivide'; params = { steps: action.steps }; selection = action.selection; modelId = action.modelId;
         } else if (action.type === 'TEXTURIZE_KNURLING') {
             toolMode = 'texturize'; params = { type: 'knurling', ...action.params }; selection = action.selection; modelId = action.modelId;
+            set({ textureType: 'knurling' });
         } else if (action.type === 'TEXTURIZE_HONEYCOMB') {
             toolMode = 'texturize'; params = { type: 'honeycomb', ...action.params }; selection = action.selection; modelId = action.modelId;
+            set({ textureType: 'honeycomb' });
         } else if (action.type === 'TEXTURIZE_DECIMATE') {
             toolMode = 'texturize'; params = { type: 'decimate', ...action.params }; selection = action.selection; modelId = action.modelId;
+            set({ textureType: 'decimate' });
         }
 
         if (toolMode && modelId) {
@@ -454,6 +463,7 @@ export const useStore = create<AppState>((set, get) => ({
         return { smartSelection: { ...state.smartSelection, [modelId]: filtered } };
     }),
     clearSmartSelection: () => set({ smartSelection: {} }),
+    setTextureType: (type) => set({ textureType: type }),
 
     subdivideSelection: (modelId, steps) => {
         const model = get().models.find(m => m.id === modelId);

@@ -1,8 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { useStore } from '../../store/useStore';
 import type { KnurlPattern } from '../../utils/texturizeUtils';
-import { Eye, EyeOff, Box, Trash2, Scissors, Grid3X3, X, Info, RotateCcw } from 'lucide-react';
-import { estimateSelectionCircumference } from '../../utils/meshUtils';
+import { Eye, EyeOff, Box, Trash2, Scissors, Grid3X3, X, RotateCcw } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 
@@ -25,12 +24,13 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const reEditParams = useStore((state) => state.reEditParams);
     const selectedHistoryIds = useStore((state) => state.selectedHistoryIds);
     const recalculateHistoryItem = useStore((state) => state.recalculateHistoryItem);
+    const textureType = useStore((state) => state.textureType);
+    const setTextureType = useStore((state) => state.setTextureType);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [subdivideSteps, setSubdivideSteps] = useState(1);
 
     // Texturize states
-    const [textureType, setTextureType] = useState<'knurling' | 'honeycomb' | 'decimate'>('knurling');
     const [pitch, setPitch] = useState(2.0);
     const [depth, setDepth] = useState(0.5);
     const [angle, setAngle] = useState(45);
@@ -69,22 +69,6 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const showSubdividePanel = transformMode === 'subdivide' && (hasSelection || isHistoryReEdit);
     const showTexturizePanel = transformMode === 'texturize' && (hasSelection || isHistoryReEdit);
 
-    const circumference = React.useMemo(() => {
-        if (!selectedModel || selection.length === 0) return 0;
-        return estimateSelectionCircumference(selectedModel.bufferGeometry, selection);
-    }, [selectedModel, selection]);
-
-    const suggestedPitches = React.useMemo(() => {
-        if (circumference <= 0) return [];
-        const suggestions = [];
-        const angRad = (angle * Math.PI) / 180;
-        const factor = Math.cos(angRad) + Math.sin(angRad);
-        for (let n = 20; n <= 100; n += 10) {
-            const hPitch = circumference / n;
-            suggestions.push(hPitch / factor);
-        }
-        return suggestions;
-    }, [circumference, angle]);
 
     const handleApply = () => {
         if (isHistoryReEdit) {
@@ -260,8 +244,8 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                     </div>
 
                     {!isHistoryReEdit && (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                            <div>
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end', marginBottom: '16px' }}>
+                            <div style={{ flex: 1 }}>
                                 <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>Name</label>
                                 <input
                                     type="text"
@@ -274,25 +258,40 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                         color: 'var(--text-primary)',
                                         padding: '6px 8px',
                                         borderRadius: 'var(--radius-sm)',
-                                        fontSize: '13px'
+                                        fontSize: '13px',
+                                        height: '32px'
                                     }}
                                 />
                             </div>
-                            <div>
+                            <div style={{ width: '40px' }}>
                                 <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>Color</label>
-                                <input
-                                    type="color"
-                                    value={selectedModel.color}
-                                    onChange={(e) => updateModel(selectedModel.id, { color: e.target.value })}
-                                    style={{
+                                <div style={{ position: 'relative', width: '32px', height: '32px' }}>
+                                    <input
+                                        type="color"
+                                        value={selectedModel.color}
+                                        onChange={(e) => updateModel(selectedModel.id, { color: e.target.value })}
+                                        style={{
+                                            position: 'absolute',
+                                            top: 0,
+                                            left: 0,
+                                            width: '100%',
+                                            height: '100%',
+                                            padding: '0',
+                                            border: '1px solid var(--border-color)',
+                                            borderRadius: 'var(--radius-sm)',
+                                            cursor: 'pointer',
+                                            opacity: 0
+                                        }}
+                                    />
+                                    <div style={{
                                         width: '100%',
-                                        height: '30px',
-                                        padding: '0',
+                                        height: '100%',
+                                        backgroundColor: selectedModel.color,
                                         border: '1px solid var(--border-color)',
                                         borderRadius: 'var(--radius-sm)',
-                                        cursor: 'pointer'
-                                    }}
-                                />
+                                        pointerEvents: 'none'
+                                    }} />
+                                </div>
                             </div>
                         </div>
                     )}
@@ -373,54 +372,63 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                 </h3>
                             </div>
 
-                            <div style={{ display: 'flex', gap: '4px', marginBottom: '16px', backgroundColor: 'var(--bg-input)', padding: '2px', borderRadius: '4px' }}>
-                                {(['knurling', 'honeycomb', 'decimate'] as const).map((t) => (
-                                    <button
-                                        key={t}
-                                        onClick={() => setTextureType(t)}
-                                        style={{
-                                            flex: 1,
-                                            padding: '6px',
-                                            fontSize: '11px',
-                                            borderRadius: '3px',
-                                            backgroundColor: textureType === t ? (isHistoryReEdit ? '#00d2ff' : 'var(--accent-primary)') : 'transparent',
-                                            color: 'white',
-                                            border: 'none',
-                                            cursor: 'pointer',
-                                            transition: 'all 0.2s',
-                                            textTransform: 'capitalize'
-                                        }}
-                                    >
-                                        {t === 'decimate' ? 'Simplify' : t}
-                                    </button>
-                                ))}
+                            <div style={{ marginBottom: '16px' }}>
+                                <div style={{
+                                    fontSize: '11px',
+                                    color: 'var(--text-muted)',
+                                    textTransform: 'uppercase',
+                                    letterSpacing: '0.05em',
+                                    backgroundColor: 'var(--bg-input)',
+                                    padding: '4px 8px',
+                                    borderRadius: '4px',
+                                    display: 'inline-block'
+                                }}>
+                                    Active: {textureType === 'decimate' ? 'Simplify' : textureType}
+                                </div>
                             </div>
 
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                                 {textureType === 'knurling' && (
                                     <>
+                                        {/* 1. Knurl Pattern */}
                                         <div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Pitch (mm)</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '500' }}>{pitch.toFixed(2)}</span>
+                                            <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>1. Knurl Pattern</label>
+                                            <div style={{ display: 'flex', gap: '4px' }}>
+                                                {(['diamond', 'straight', 'diagonal', 'square'] as const).map((p) => (
+                                                    <button
+                                                        key={p}
+                                                        onClick={() => {
+                                                            setKnurlPattern(p);
+                                                            if (p === 'straight' && angle !== 0 && angle !== 90) setAngle(0);
+                                                            if (p !== 'straight' && (angle === 90)) setAngle(45);
+                                                        }}
+                                                        style={{
+                                                            flex: 1,
+                                                            padding: '8px 4px',
+                                                            fontSize: '10px',
+                                                            borderRadius: '4px',
+                                                            backgroundColor: knurlPattern === p ? 'var(--accent-primary)' : 'var(--bg-input)',
+                                                            color: 'white',
+                                                            border: '1px solid var(--border-color)',
+                                                            cursor: 'pointer',
+                                                            textTransform: 'capitalize',
+                                                            transition: 'all 0.2s'
+                                                        }}
+                                                    >
+                                                        {p}
+                                                    </button>
+                                                ))}
                                             </div>
-                                            <input
-                                                type="range"
-                                                min="0.1"
-                                                max="10"
-                                                step="0.01"
-                                                value={pitch}
-                                                onChange={(e) => setPitch(parseFloat(e.target.value))}
-                                                style={{ width: '100%', accentColor: 'var(--accent-primary)', marginBottom: '12px' }}
-                                            />
                                         </div>
+
+                                        {/* 2. Knurling Angle */}
                                         <div>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Knurling Angle</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '500' }}>{angle}°</span>
+                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>2. Knurling Angle</label>
+                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{angle}°</span>
                                             </div>
-                                            <div style={{ display: 'flex', gap: '4px', marginBottom: '16px' }}>
-                                                {[0, 30, 45].map((a) => (
+                                            <div style={{ display: 'flex', gap: '4px' }}>
+                                                {(knurlPattern === 'straight' ? [0, 90] : [0, 30, 45]).map((a) => (
                                                     <button
                                                         key={a}
                                                         onClick={() => setAngle(a)}
@@ -432,33 +440,48 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                                             backgroundColor: angle === a ? (isHistoryReEdit ? '#00d2ff' : 'var(--accent-primary)') : 'var(--bg-input)',
                                                             color: 'white',
                                                             border: '1px solid var(--border-color)',
-                                                            cursor: 'pointer'
+                                                            cursor: 'pointer',
+                                                            transition: 'all 0.2s'
                                                         }}
                                                     >
-                                                        {a === 0 ? 'Straight' : `${a}°`}
+                                                        {a === 0 && knurlPattern === 'straight' ? 'Vertical' : (a === 90 ? 'Horizontal' : `${a}°`)}
                                                     </button>
                                                 ))}
                                             </div>
                                         </div>
+
+                                        {/* 3. Pitch */}
                                         <div>
-                                            <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px' }}>Knurl Pattern</label>
-                                            <select
-                                                value={knurlPattern}
-                                                onChange={(e) => setKnurlPattern(e.target.value as KnurlPattern)}
-                                                style={{
-                                                    width: '100%',
-                                                    backgroundColor: 'var(--bg-input)',
-                                                    border: '1px solid var(--border-color)',
-                                                    color: 'white',
-                                                    padding: '8px',
-                                                    borderRadius: '4px'
-                                                }}
-                                            >
-                                                <option value="diamond">Diamond</option>
-                                                <option value="straight">Straight</option>
-                                                <option value="diagonal">Diagonal</option>
-                                                <option value="square">Square</option>
-                                            </select>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>3. Pitch (mm)</label>
+                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{pitch.toFixed(2)}</span>
+                                            </div>
+                                            <input
+                                                type="range"
+                                                min="0.1"
+                                                max="10"
+                                                step="0.01"
+                                                value={pitch}
+                                                onChange={(e) => setPitch(parseFloat(e.target.value))}
+                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                            />
+                                        </div>
+
+                                        {/* 4. Depth */}
+                                        <div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>4. Depth (mm)</label>
+                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{depth.toFixed(2)}</span>
+                                            </div>
+                                            <input
+                                                type="range"
+                                                min="0.1"
+                                                max="5"
+                                                step="0.1"
+                                                value={depth}
+                                                onChange={(e) => setDepth(parseFloat(e.target.value))}
+                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                            />
                                         </div>
                                     </>
                                 )}
@@ -480,24 +503,41 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                                 style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
                                             />
                                         </div>
+                                        <div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Depth (mm)</label>
+                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '500' }}>{depth}</span>
+                                            </div>
+                                            <input
+                                                type="range"
+                                                min="0.1"
+                                                max="5"
+                                                step="0.1"
+                                                value={depth}
+                                                onChange={(e) => setDepth(parseFloat(e.target.value))}
+                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                            />
+                                        </div>
                                     </>
                                 )}
 
-                                <div>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                        <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Depth (mm)</label>
-                                        <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '500' }}>{depth}</span>
+                                {textureType === 'decimate' && (
+                                    <div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                            <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Reduction Ratio</label>
+                                            <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '500' }}>{(reductionRatio * 100).toFixed(0)}%</span>
+                                        </div>
+                                        <input
+                                            type="range"
+                                            min="0.01"
+                                            max="0.99"
+                                            step="0.01"
+                                            value={reductionRatio}
+                                            onChange={(e) => setReductionRatio(parseFloat(e.target.value))}
+                                            style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                        />
                                     </div>
-                                    <input
-                                        type="range"
-                                        min="0.1"
-                                        max="5"
-                                        step="0.1"
-                                        value={depth}
-                                        onChange={(e) => setDepth(parseFloat(e.target.value))}
-                                        style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
-                                    />
-                                </div>
+                                )}
 
                                 <button
                                     onClick={handleApply}

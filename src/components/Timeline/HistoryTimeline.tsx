@@ -82,6 +82,7 @@ export const HistoryTimeline: React.FC = () => {
     };
 
     const [isDragging, setIsDragging] = useState(false);
+    const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
     const timelineContainerRef = useRef<HTMLDivElement>(null);
 
     const itemWidth = isMobile ? 32 : 28;
@@ -113,7 +114,7 @@ export const HistoryTimeline: React.FC = () => {
         }
     };
 
-    const handleContainerMouseDown = (e: React.MouseEvent) => {
+    const handleContainerMouseDown = () => {
         // Only trigger drag if clicking the track area, not icons
         setIsDragging(true);
     };
@@ -196,7 +197,13 @@ export const HistoryTimeline: React.FC = () => {
                     return (
                         <div
                             key={entry.id}
-                            onMouseEnter={() => setHistoryPreviewId(entry.id)}
+                            onMouseEnter={(e) => {
+                                setHistoryPreviewId(entry.id);
+                                setMousePos({ x: e.clientX, y: e.clientY });
+                            }}
+                            onMouseMove={(e) => {
+                                setMousePos({ x: e.clientX, y: e.clientY });
+                            }}
                             onMouseLeave={() => setHistoryPreviewId(null)}
                             onDoubleClick={(e) => { e.stopPropagation(); reEditHistoryItem(index); }}
                             onClick={(e) => handleItemSelection(index, entry.id, e)}
@@ -260,6 +267,36 @@ export const HistoryTimeline: React.FC = () => {
                     <Redo2 size={14} />
                 </button>
             </div>
+            {/* Premium Tooltip */}
+            {historyPreviewId && (
+                <div style={{
+                    position: 'fixed',
+                    left: `${mousePos.x}px`,
+                    top: `${mousePos.y - 40}px`,
+                    transform: 'translateX(-50%)',
+                    backgroundColor: 'rgba(0, 0, 0, 0.85)',
+                    color: 'white',
+                    padding: '6px 12px',
+                    borderRadius: '6px',
+                    fontSize: '12px',
+                    fontWeight: '500',
+                    pointerEvents: 'none',
+                    zIndex: 10000,
+                    whiteSpace: 'nowrap',
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+                    backdropFilter: 'blur(4px)',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    animation: 'fadeInUp 0.15s ease-out'
+                }}>
+                    <div style={{ color: '#ffcc00' }}>
+                        {getIconForAction(history.find(h => h.id === historyPreviewId)?.label || '')}
+                    </div>
+                    {history.find(h => h.id === historyPreviewId)?.label}
+                </div>
+            )}
         </div>
     );
 };
