@@ -20,11 +20,37 @@ const Model = ({ model }: { model: any }) => {
     const removeSelection = useStore((state) => state.removeFromSmartSelection);
     const selection = useStore((state) => state.smartSelection[model.id] || EMPTY_ARRAY);
 
+    const historyPreviewId = useStore((state) => state.historyPreviewId);
+    const history = useStore((state) => state.history);
+
     // Derived geometry for highlight
     const highlightGeo = React.useMemo(() => {
         if (selection.length === 0) return null;
         return generateSelectionGeometry(model.bufferGeometry, selection);
     }, [model.bufferGeometry, selection]);
+
+    const previewGeo = React.useMemo(() => {
+        if (!historyPreviewId) return null;
+        const entryIdx = history.findIndex(h => h.id === historyPreviewId);
+        if (entryIdx <= 0) return null;
+
+        const entry = history[entryIdx];
+        if (!('selection' in entry.action) || (entry.action as any).modelId !== model.id) return null;
+
+        // Use the state BEFORE the action was applied to show what was selected correctly
+        const prevState = history[entryIdx - 1];
+        const prevModel = prevState.models.find(m => m.id === model.id);
+        if (!prevModel) return null;
+
+        try {
+            return {
+                geometry: generateSelectionGeometry(prevModel.bufferGeometry, (entry.action as any).selection),
+                model: prevModel
+            };
+        } catch (e) {
+            return null;
+        }
+    }, [historyPreviewId, history, model.id]);
 
     // Derived segmentation data for both visualization and smart selection
     const segmentation = React.useMemo(() => {
@@ -109,6 +135,19 @@ const Model = ({ model }: { model: any }) => {
                         polygonOffset
                         polygonOffsetFactor={0.1}
                         polygonOffsetUnits={0.1}
+                    />
+                </mesh>
+            )}
+            {previewGeo && (
+                <mesh geometry={previewGeo.geometry} renderOrder={0.8}>
+                    <meshBasicMaterial
+                        color="#00d2ff"
+                        side={THREE.DoubleSide}
+                        polygonOffset
+                        polygonOffsetFactor={0.2}
+                        polygonOffsetUnits={0.2}
+                        transparent
+                        opacity={0.8}
                     />
                 </mesh>
             )}

@@ -20,7 +20,6 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const selectAllFaces = useStore((state) => state.selectAllFaces);
     const smartSelection = useStore((state) => state.smartSelection);
     const transformMode = useStore((state) => state.transformMode);
-    const reEditParams = useStore((state) => state.reEditParams);
 
     const [subdivideSteps, setSubdivideSteps] = useState(1);
 
@@ -33,24 +32,6 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const [wallThickness, setWallThickness] = useState(0.5);
     const [knurlPattern, setKnurlPattern] = useState<KnurlPattern>('diamond');
     const [reductionRatio, setReductionRatio] = useState(0.5);
-
-    // Sync with re-edit params
-    React.useEffect(() => {
-        if (reEditParams) {
-            if (transformMode === 'subdivide') {
-                if (reEditParams.steps !== undefined) setSubdivideSteps(reEditParams.steps);
-            } else if (transformMode === 'texturize') {
-                if (reEditParams.type) setTextureType(reEditParams.type);
-                if (reEditParams.pitch !== undefined) setPitch(reEditParams.pitch);
-                if (reEditParams.depth !== undefined) setDepth(reEditParams.depth);
-                if (reEditParams.angle !== undefined) setAngle(reEditParams.angle);
-                if (reEditParams.pattern) setKnurlPattern(reEditParams.pattern);
-                if (reEditParams.cellSize !== undefined) setCellSize(reEditParams.cellSize);
-                if (reEditParams.wallThickness !== undefined) setWallThickness(reEditParams.wallThickness);
-                if (reEditParams.reduction !== undefined) setReductionRatio(reEditParams.reduction);
-            }
-        }
-    }, [reEditParams, transformMode]);
 
 
 
@@ -70,19 +51,12 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const suggestedPitches = React.useMemo(() => {
         if (circumference <= 0) return [];
         const suggestions = [];
-        // Factor for diagonal pitch alignment
-        // For a square grid rotated by A, the horizontal projection of one repeat unit
-        // is P * (cos A + sin A)
-        const angRad = (angle * Math.PI) / 180;
-        const factor = Math.cos(angRad) + Math.sin(angRad);
-
-        // Show pitches that result in an integer number of divisions around the circumference
-        for (let n = 20; n <= 100; n += 10) {
-            const hPitch = circumference / n;
-            suggestions.push(hPitch / factor);
+        // Show pitches that result in 20 to 80 divisions
+        for (let n = 20; n <= 80; n += 10) {
+            suggestions.push(circumference / n);
         }
         return suggestions;
-    }, [circumference, angle]);
+    }, [circumference]);
 
     return (
         <div style={{
@@ -359,30 +333,18 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                         </div>
                                         <div>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Knurling Angle</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '500' }}>{angle}°</span>
+                                                <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Angle (??)</label>
+                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '500' }}>{angle}??</span>
                                             </div>
-                                            <div style={{ display: 'flex', gap: '4px', marginBottom: '16px' }}>
-                                                {[0, 30, 45].map((a) => (
-                                                    <button
-                                                        key={a}
-                                                        onClick={() => setAngle(a)}
-                                                        style={{
-                                                            flex: 1,
-                                                            padding: '8px',
-                                                            fontSize: '11px',
-                                                            borderRadius: '4px',
-                                                            backgroundColor: angle === a ? 'var(--accent-primary)' : 'var(--bg-input)',
-                                                            color: 'white',
-                                                            border: '1px solid var(--border-color)',
-                                                            cursor: 'pointer',
-                                                            transition: 'all 0.2s'
-                                                        }}
-                                                    >
-                                                        {a === 0 ? 'Straight (0°)' : `${a}°`}
-                                                    </button>
-                                                ))}
-                                            </div>
+                                            <input
+                                                type="range"
+                                                min="0"
+                                                max="180"
+                                                step="5"
+                                                value={angle}
+                                                onChange={(e) => setAngle(parseFloat(e.target.value))}
+                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                            />
                                         </div>
                                         <div>
                                             <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px' }}>Knurl Pattern</label>

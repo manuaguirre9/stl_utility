@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import * as THREE from 'three';
 import { v4 as uuidv4 } from 'uuid';
-import { subdivideSelectedFaces, getContiguousIslands } from '../utils/meshUtils';
+import { subdivideSelectedFaces } from '../utils/meshUtils';
 import { applyKnurling, applyHoneycomb, applyDecimate } from '../utils/texturizeUtils';
 import type { KnurlPattern } from '../utils/texturizeUtils';
 
@@ -33,6 +33,7 @@ interface HistoryEntry {
     id: string;
     label: string;
     action: HistoryAction;
+    // We still keep snapshots for performance, but they will be rebuilt on deletion
     models: ModelData[];
     smartSelection: Record<string, number[]>;
     timestamp: number;
@@ -51,21 +52,15 @@ interface AppState {
     // History State
     history: HistoryEntry[];
     historyIndex: number;
-    historyPreviewId: string | null;
-
-    // Re-edit State
-    reEditParams: any | null;
+    selectedHistoryId: string | null;
 
     // History Actions
     undo: () => void;
     redo: () => void;
     jumpToHistory: (index: number) => void;
     recordHistory: (label: string, action: HistoryAction) => void;
-    deleteHistoryEntry: (id: string | string[]) => void;
-    selectedHistoryIds: string[];
-    setSelectedHistoryIds: (ids: string[]) => void;
-    setHistoryPreviewId: (id: string | null) => void;
-    reEditHistoryItem: (index: number) => void;
+    deleteHistoryEntry: (id: string) => void;
+    setSelectedHistoryId: (id: string | null) => void;
 
     // Standard Actions
     addModel: (model: ModelData) => void;
@@ -116,11 +111,9 @@ export const useStore = create<AppState>((set, get) => ({
         timestamp: Date.now()
     }],
     historyIndex: 0,
-    historyPreviewId: null,
-    reEditParams: null,
-    selectedHistoryIds: ['initial'],
-    setSelectedHistoryIds: (ids) => set({ selectedHistoryIds: ids }),
-    setHistoryPreviewId: (id) => set({ historyPreviewId: id }),
+    selectedHistoryId: 'initial',
+
+    setSelectedHistoryId: (id) => set({ selectedHistoryId: id }),
 
     recordHistory: (label, action) => {
         const { models, smartSelection, history, historyIndex } = get();
@@ -138,27 +131,27 @@ export const useStore = create<AppState>((set, get) => ({
         set({
             history: [...newHistory, entry],
             historyIndex: newHistory.length,
-            selectedHistoryIds: [entry.id],
-            reEditParams: null
+            selectedHistoryId: entry.id
         });
     },
 
-    deleteHistoryEntry: (ids) => {
+    deleteHistoryEntry: (id) => {
         const { history } = get();
-        const idList = Array.isArray(ids) ? ids : [ids];
-        const idsToRemove = new Set(idList);
+        const entryToDelete = history.find(h => h.id === id);
+        if (!entryToDelete || entryToDelete.action.type === 'INITIAL') return;
 
-        if (idsToRemove.has('initial')) idsToRemove.delete('initial');
-        if (idsToRemove.size === 0) return;
+        // 1. Remove from sequence
+        const newHistoryActions = history.filter(h => h.id !== id).map(h => ({ label: h.label, action: h.action }));
 
-        const newHistoryActions = history.filter(h => !idsToRemove.has(h.id)).map(h => ({ label: h.label, action: h.action }));
-
+        // 2. Re-calculate everything from scratch
         let currentModels: ModelData[] = [];
         let currentSelection: Record<string, number[]> = {};
         const rebuiltHistory: HistoryEntry[] = [];
 
         newHistoryActions.forEach((item) => {
             const action = item.action;
+
+            // Apply action to current state
             if (action.type === 'INITIAL') {
                 currentModels = [];
                 currentSelection = {};
@@ -195,7 +188,7 @@ export const useStore = create<AppState>((set, get) => ({
             }
 
             rebuiltHistory.push({
-                id: uuidv4(),
+                id: uuidv4(), // Generate new IDs for the rebuilt track to avoid conflicts
                 label: item.label,
                 action: action,
                 models: cloneModelsSnapshot(currentModels),
@@ -204,18 +197,20 @@ export const useStore = create<AppState>((set, get) => ({
             });
         });
 
+        // 3. Update state to the last successful state in the new history
         const lastEntry = rebuiltHistory[rebuiltHistory.length - 1];
         set({
             history: rebuiltHistory,
             historyIndex: rebuiltHistory.length - 1,
             models: cloneModelsSnapshot(lastEntry.models),
             smartSelection: JSON.parse(JSON.stringify(lastEntry.smartSelection)),
-            selectedHistoryIds: [lastEntry.id]
+            selectedHistoryId: lastEntry.id
         });
     },
 
     undo: () => {
         const { historyIndex, history, deleteHistoryEntry } = get();
+        // Don't delete the initial state
         if (historyIndex > 0) {
             const entryToDelete = history[historyIndex];
             deleteHistoryEntry(entryToDelete.id);
@@ -231,7 +226,7 @@ export const useStore = create<AppState>((set, get) => ({
                 models: cloneModelsSnapshot(state.models),
                 smartSelection: JSON.parse(JSON.stringify(state.smartSelection)),
                 historyIndex: nextIndex,
-                selectedHistoryIds: [state.id]
+                selectedHistoryId: state.id
             });
         }
     },
@@ -244,43 +239,7 @@ export const useStore = create<AppState>((set, get) => ({
                 models: cloneModelsSnapshot(state.models),
                 smartSelection: JSON.parse(JSON.stringify(state.smartSelection)),
                 historyIndex: index,
-                selectedHistoryIds: [state.id]
-            });
-        }
-    },
-
-    reEditHistoryItem: (index) => {
-        const { history } = get();
-        const entry = history[index];
-        if (!entry || entry.id === 'initial') return;
-
-        const prevState = history[index - 1];
-        const action = entry.action;
-        let toolMode: TransformMode = null;
-        let params: any = null;
-        let selection: number[] = [];
-        let modelId: string | null = null;
-
-        if (action.type === 'SUBDIVIDE') {
-            toolMode = 'subdivide'; params = { steps: action.steps }; selection = action.selection; modelId = action.modelId;
-        } else if (action.type === 'TEXTURIZE_KNURLING') {
-            toolMode = 'texturize'; params = { type: 'knurling', ...action.params }; selection = action.selection; modelId = action.modelId;
-        } else if (action.type === 'TEXTURIZE_HONEYCOMB') {
-            toolMode = 'texturize'; params = { type: 'honeycomb', ...action.params }; selection = action.selection; modelId = action.modelId;
-        } else if (action.type === 'TEXTURIZE_DECIMATE') {
-            toolMode = 'texturize'; params = { type: 'decimate', ...action.params }; selection = action.selection; modelId = action.modelId;
-        }
-
-        if (toolMode && modelId) {
-            set({
-                models: cloneModelsSnapshot(prevState.models),
-                smartSelection: { [modelId]: selection },
-                historyIndex: index - 1,
-                selectedId: modelId,
-                transformMode: toolMode,
-                reEditParams: params,
-                history: history.slice(0, index),
-                selectedHistoryIds: [prevState.id]
+                selectedHistoryId: state.id
             });
         }
     },
@@ -310,7 +269,7 @@ export const useStore = create<AppState>((set, get) => ({
         }
     },
 
-    setTransformMode: (mode) => set({ transformMode: mode, reEditParams: null }),
+    setTransformMode: (mode) => set({ transformMode: mode }),
     toggleShowMesh: () => set((state) => ({ showMesh: !state.showMesh })),
     toggleShowEdges: () => set((state) => ({ showEdges: !state.showEdges })),
     toggleClassification: () => set((state) => ({ showClassification: !state.showClassification })),
@@ -337,34 +296,19 @@ export const useStore = create<AppState>((set, get) => ({
         const selection = get().smartSelection[modelId] || [];
         if (selection.length === 0) return;
 
-        // Sort islands by min-index to be predictable
-        const islands = getContiguousIslands(model.bufferGeometry, selection)
-            .sort((a, b) => Math.min(...a) - Math.min(...b));
+        const newGeometry = subdivideSelectedFaces(model.bufferGeometry, selection, steps);
 
-        let currentGeometry = model.bufferGeometry;
-        const processedOriginals = new Set<number>();
+        set((state) => ({
+            models: state.models.map(m => m.id === modelId ? { ...m, bufferGeometry: newGeometry, meshVersion: m.meshVersion + 1 } : m),
+            smartSelection: { ...state.smartSelection, [modelId]: [] },
+            showMesh: true
+        }));
 
-        set({ smartSelection: { ...get().smartSelection, [modelId]: [] }, showMesh: true });
-
-        islands.forEach((island, idx) => {
-            // Find current location of these original faces
-            const translatedIsland = island.map(origIdx => {
-                let shift = 0;
-                processedOriginals.forEach(o => { if (o < origIdx) shift++; });
-                return origIdx - shift;
-            });
-
-            const nextGeometry = subdivideSelectedFaces(currentGeometry, translatedIsland, steps);
-            island.forEach(i => processedOriginals.add(i));
-            currentGeometry = nextGeometry;
-
-            set((state) => ({
-                models: state.models.map(m => m.id === modelId ? { ...m, bufferGeometry: currentGeometry, meshVersion: m.meshVersion + 1 } : m)
-            }));
-
-            get().recordHistory(`Subdivide Surface ${idx + 1}`, {
-                type: 'SUBDIVIDE', modelId, steps, selection: translatedIsland
-            });
+        get().recordHistory(`Subdivide (${steps} steps)`, {
+            type: 'SUBDIVIDE',
+            modelId,
+            steps,
+            selection: [...selection]
         });
     },
 
@@ -374,45 +318,39 @@ export const useStore = create<AppState>((set, get) => ({
         const selection = get().smartSelection[modelId] || [];
         if (selection.length === 0) return;
 
-        const islands = getContiguousIslands(model.bufferGeometry, selection)
-            .sort((a, b) => Math.min(...a) - Math.min(...b));
-
-        let currentGeometry = model.bufferGeometry;
-        const processedOriginals = new Set<number>();
-
-        set({ smartSelection: { ...get().smartSelection, [modelId]: [] }, showMesh: true });
-
-        islands.forEach((island, idx) => {
-            const translatedIsland = island.map(origIdx => {
-                let shift = 0;
-                processedOriginals.forEach(o => { if (o < origIdx) shift++; });
-                return origIdx - shift;
+        let newGeometry = model.bufferGeometry;
+        if (params.type === 'knurling') {
+            newGeometry = applyKnurling(model.bufferGeometry, selection, {
+                pitch: params.pitch,
+                depth: params.depth,
+                angle: params.angle,
+                pattern: params.pattern
             });
+        } else if (params.type === 'honeycomb') {
+            newGeometry = applyHoneycomb(model.bufferGeometry, selection, {
+                cellSize: params.cellSize,
+                wallThickness: params.wallThickness,
+                depth: params.depth
+            });
+        } else if (params.type === 'decimate') {
+            newGeometry = applyDecimate(model.bufferGeometry, selection, {
+                reduction: params.reduction
+            });
+        }
 
-            let nextGeometry = currentGeometry;
-            if (params.type === 'knurling') {
-                nextGeometry = applyKnurling(currentGeometry, translatedIsland, params);
-            } else if (params.type === 'honeycomb') {
-                nextGeometry = applyHoneycomb(currentGeometry, translatedIsland, params);
-            } else if (params.type === 'decimate') {
-                nextGeometry = applyDecimate(currentGeometry, translatedIsland, params);
-            }
+        set((state) => ({
+            models: state.models.map(m => m.id === modelId ? { ...m, bufferGeometry: newGeometry, meshVersion: m.meshVersion + 1 } : m),
+            smartSelection: { ...state.smartSelection, [modelId]: [] },
+            showMesh: true
+        }));
 
-            island.forEach(i => processedOriginals.add(i));
-            currentGeometry = nextGeometry;
-
-            set((state) => ({
-                models: state.models.map(m => m.id === modelId ? { ...m, bufferGeometry: currentGeometry, meshVersion: m.meshVersion + 1 } : m)
-            }));
-
-            get().recordHistory(`Texturize ${params.type} - Surface ${idx + 1}`,
-                params.type === 'knurling'
-                    ? { type: 'TEXTURIZE_KNURLING', modelId, params: { ...params }, selection: translatedIsland }
-                    : params.type === 'honeycomb'
-                        ? { type: 'TEXTURIZE_HONEYCOMB', modelId, params: { ...params }, selection: translatedIsland }
-                        : { type: 'TEXTURIZE_DECIMATE', modelId, params: { ...params }, selection: translatedIsland }
-            );
-        });
+        get().recordHistory(`Texturize: ${params.type}`,
+            params.type === 'knurling'
+                ? { type: 'TEXTURIZE_KNURLING', modelId, params: { pitch: params.pitch, depth: params.depth, angle: params.angle, pattern: params.pattern }, selection: [...selection] }
+                : params.type === 'honeycomb'
+                    ? { type: 'TEXTURIZE_HONEYCOMB', modelId, params: { cellSize: params.cellSize, wallThickness: params.wallThickness, depth: params.depth }, selection: [...selection] }
+                    : { type: 'TEXTURIZE_DECIMATE', modelId, params: { reduction: params.reduction }, selection: [...selection] }
+        );
     },
 
     selectAllFaces: (modelId) => {

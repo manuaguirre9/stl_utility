@@ -15,7 +15,8 @@ import {
     Settings2,
     Home,
     Undo2,
-    Redo2
+    Redo2,
+    Trash2
 } from 'lucide-react';
 
 const getIconForAction = (label: string) => {
@@ -33,12 +34,15 @@ export const HistoryTimeline: React.FC = () => {
     const isMobile = useIsMobile();
     const history = useStore((state) => state.history);
     const historyIndex = useStore((state) => state.historyIndex);
-    const selectedHistoryId = useStore((state) => state.selectedHistoryId);
-    const setSelectedHistoryId = useStore((state) => state.setSelectedHistoryId);
+    const selectedHistoryIds = useStore((state) => state.selectedHistoryIds);
+    const setSelectedHistoryIds = useStore((state) => state.setSelectedHistoryIds);
     const deleteHistoryEntry = useStore((state) => state.deleteHistoryEntry);
     const jumpToHistory = useStore((state) => state.jumpToHistory);
     const undo = useStore((state) => state.undo);
     const redo = useStore((state) => state.redo);
+    const historyPreviewId = useStore((state) => state.historyPreviewId);
+    const setHistoryPreviewId = useStore((state) => state.setHistoryPreviewId);
+    const reEditHistoryItem = useStore((state) => state.reEditHistoryItem);
 
     const [isPlaying, setIsPlaying] = useState(false);
     const playTimerRef = useRef<any>(null);
@@ -65,14 +69,37 @@ export const HistoryTimeline: React.FC = () => {
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             if (e.key === 'Delete' || e.key === 'Backspace') {
-                if (selectedHistoryId && selectedHistoryId !== 'initial') {
-                    deleteHistoryEntry(selectedHistoryId);
+                if (selectedHistoryIds.length > 0) {
+                    deleteHistoryEntry(selectedHistoryIds);
                 }
             }
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [selectedHistoryId, deleteHistoryEntry]);
+    }, [selectedHistoryIds, deleteHistoryEntry]);
+
+    const handleItemClick = (index: number, entryId: string, event: React.MouseEvent) => {
+        stopPlayback();
+        jumpToHistory(index);
+
+        if (event.shiftKey && selectedHistoryIds.length > 0) {
+            // Find current selection indices
+            const selectedIndices = history
+                .map((h, i) => selectedHistoryIds.includes(h.id) ? i : -1)
+                .filter(i => i !== -1);
+
+            const minSelected = Math.min(...selectedIndices);
+            const maxSelected = Math.max(...selectedIndices);
+
+            const start = Math.min(minSelected, index);
+            const end = Math.max(maxSelected, index);
+
+            const newSelection = history.slice(start, end + 1).map(h => h.id);
+            setSelectedHistoryIds(newSelection);
+        } else {
+            setSelectedHistoryIds([entryId]);
+        }
+    };
 
     const stopPlayback = () => setIsPlaying(false);
 
@@ -158,35 +185,35 @@ export const HistoryTimeline: React.FC = () => {
             }}>
                 {history.map((entry, index) => {
                     const isActive = index === historyIndex;
-                    const isSelected = entry.id === selectedHistoryId;
+                    const isSelected = selectedHistoryIds.includes(entry.id);
                     const isFuture = index > historyIndex;
+                    const isPreviewed = historyPreviewId === entry.id;
 
                     return (
                         <div
                             key={entry.id}
-                            onClick={() => {
-                                stopPlayback();
-                                jumpToHistory(index);
-                                setSelectedHistoryId(entry.id);
-                            }}
-                            title={entry.label}
+                            onClick={(e) => handleItemClick(index, entry.id, e)}
+                            onDoubleClick={() => reEditHistoryItem(index)}
+                            onMouseEnter={() => setHistoryPreviewId(entry.id)}
+                            onMouseLeave={() => setHistoryPreviewId(null)}
+                            title={`${entry.label} (Double-click to re-edit)`}
                             style={{
                                 minWidth: isMobile ? '36px' : '32px',
                                 height: isMobile ? '36px' : '32px',
                                 display: 'flex',
                                 alignItems: 'center',
                                 justifyContent: 'center',
-                                backgroundColor: isSelected ? 'var(--accent-primary)' : 'var(--bg-input)',
+                                backgroundColor: isSelected ? 'var(--accent-primary)' : (isPreviewed ? 'rgba(0, 210, 255, 0.3)' : 'var(--bg-input)'),
                                 borderRadius: 'var(--radius-sm)',
                                 cursor: 'pointer',
                                 color: isSelected ? 'white' : (isFuture ? 'var(--text-muted)' : 'var(--text-primary)'),
-                                border: isSelected ? (isActive ? '2px solid white' : '2px solid rgba(255,255,255,0.5)') : '1px solid var(--border-color)',
+                                border: isSelected ? (isActive ? '2px solid white' : '2px solid rgba(255,255,255,0.5)') : (isPreviewed ? '1px solid #00d2ff' : '1px solid var(--border-color)'),
                                 opacity: isFuture ? 0.5 : 1,
                                 transition: 'all 0.1s ease',
                                 flexShrink: 0,
-                                transform: isSelected ? 'scale(1.05)' : 'none',
-                                boxShadow: isSelected ? '0 0 12px rgba(255,107,0,0.4)' : 'none',
-                                zIndex: isSelected ? 5 : 1
+                                transform: (isSelected || isPreviewed) ? 'scale(1.05)' : 'none',
+                                boxShadow: isSelected ? '0 0 12px rgba(255,107,0,0.4)' : (isPreviewed ? '0 0 12px rgba(0, 210, 255, 0.4)' : 'none'),
+                                zIndex: (isSelected || isPreviewed) ? 5 : 1
                             }}
                         >
                             {getIconForAction(entry.label)}
@@ -195,24 +222,44 @@ export const HistoryTimeline: React.FC = () => {
                 })}
             </div>
 
-            {/* Undo/Redo secondary buttons - Hidden on mobile as we have bigger arrows */}
-            {!isMobile && (
-                <div style={{
-                    display: 'flex',
-                    gap: '8px',
-                    paddingLeft: '15px',
-                    borderLeft: '1px solid var(--border-color)',
-                    height: '70%',
-                    alignItems: 'center'
-                }}>
-                    <button onClick={undo} disabled={historyIndex === 0} style={iconOnlyBtnStyle}>
-                        <Undo2 size={14} />
+            {/* Bulk Actions & Navigation */}
+            <div style={{
+                display: 'flex',
+                gap: '8px',
+                paddingLeft: isMobile ? '8px' : '15px',
+                borderLeft: '1px solid var(--border-color)',
+                height: '70%',
+                alignItems: 'center'
+            }}>
+                {selectedHistoryIds.length > 1 && (
+                    <button
+                        onClick={() => deleteHistoryEntry(selectedHistoryIds)}
+                        style={{
+                            ...iconOnlyBtnStyle,
+                            backgroundColor: '#ff4444',
+                            color: 'white',
+                            borderColor: '#ff4444',
+                            padding: '4px 8px',
+                            fontSize: '11px',
+                            fontWeight: 'bold',
+                            gap: '4px'
+                        }}
+                    >
+                        <Trash2 size={12} />
+                        Delete {selectedHistoryIds.length}
                     </button>
-                    <button onClick={redo} disabled={historyIndex === history.length - 1} style={iconOnlyBtnStyle}>
-                        <Redo2 size={14} />
-                    </button>
-                </div>
-            )}
+                )}
+                {!isMobile && (
+                    <>
+                        <button onClick={undo} disabled={historyIndex === 0} style={iconOnlyBtnStyle}>
+                            <Undo2 size={14} />
+                        </button>
+                        <button onClick={redo} disabled={historyIndex === history.length - 1} style={iconOnlyBtnStyle}>
+                            <Redo2 size={14} />
+                        </button>
+                    </>
+                )}
+            </div>
         </div>
     );
 };

@@ -253,3 +253,85 @@ export function estimateSelectionCircumference(
     const avgRadius = radiusSum / pointCount;
     return 2 * Math.PI * avgRadius;
 }
+
+/**
+ * Groups face indices into connected islands/patches.
+ * Two faces are in the same island if they share at least one vertex
+ * AND (optional) the angle between their normals is below a threshold.
+ */
+export function getContiguousIslands(
+    geometry: THREE.BufferGeometry,
+    faceIndices: number[],
+    angleThresholdDeg: number = 20 // Lower threshold to split cylinder/cone transitions
+): number[][] {
+    if (faceIndices.length === 0) return [];
+
+    const posAttr = geometry.attributes.position;
+    const vertexToFaces = new Map<string, number[]>();
+
+    // Pre-calculate normals for all selected faces for efficient angle comparison
+    const faceNormals = new Map<number, THREE.Vector3>();
+    for (const fIdx of faceIndices) {
+        const off = fIdx * 3;
+        const vA = new THREE.Vector3().fromBufferAttribute(posAttr, off);
+        const vB = new THREE.Vector3().fromBufferAttribute(posAttr, off + 1);
+        const vC = new THREE.Vector3().fromBufferAttribute(posAttr, off + 2);
+        const normal = new THREE.Vector3()
+            .crossVectors(new THREE.Vector3().subVectors(vB, vA), new THREE.Vector3().subVectors(vC, vA))
+            .normalize();
+        faceNormals.set(fIdx, normal);
+    }
+
+    const dotThreshold = Math.cos((angleThresholdDeg * Math.PI) / 180);
+
+    // Key function for vertices to handle slight floating point issues
+    const getVKey = (fIdx: number, vIdxInFace: number) => {
+        const off = fIdx * 3 + vIdxInFace;
+        return `${Math.round(posAttr.getX(off) * 10000)},${Math.round(posAttr.getY(off) * 10000)},${Math.round(posAttr.getZ(off) * 10000)}`;
+    };
+
+    // Build vertex-to-face adjacency (only for the selected faces)
+    for (const fIdx of faceIndices) {
+        for (let v = 0; v < 3; v++) {
+            const key = getVKey(fIdx, v);
+            if (!vertexToFaces.has(key)) vertexToFaces.set(key, []);
+            vertexToFaces.get(key)!.push(fIdx);
+        }
+    }
+
+    const visited = new Set<number>();
+    const islands: number[][] = [];
+
+    for (const fIdx of faceIndices) {
+        if (visited.has(fIdx)) continue;
+
+        const island: number[] = [];
+        const stack = [fIdx];
+        visited.add(fIdx);
+
+        while (stack.length > 0) {
+            const current = stack.pop()!;
+            island.push(current);
+            const currentNormal = faceNormals.get(current)!;
+
+            // Check all 3 vertices of current face for adjacent selected faces
+            for (let v = 0; v < 3; v++) {
+                const key = getVKey(current, v);
+                const candidates = vertexToFaces.get(key) || [];
+                for (const adj of candidates) {
+                    if (!visited.has(adj)) {
+                        const adjNormal = faceNormals.get(adj)!;
+                        // Only join if normals are similar enough
+                        if (currentNormal.dot(adjNormal) >= dotThreshold) {
+                            visited.add(adj);
+                            stack.push(adj);
+                        }
+                    }
+                }
+            }
+        }
+        islands.push(island);
+    }
+
+    return islands;
+}
