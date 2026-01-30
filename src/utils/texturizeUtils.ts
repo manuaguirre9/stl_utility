@@ -9,6 +9,8 @@ export interface KnurlingParams {
     depth: number;
     angle: number;
     pattern: KnurlPattern;
+    holeFillThreshold: number;
+    holeFillEnabled: boolean;
 }
 
 export interface HoneycombParams {
@@ -18,6 +20,8 @@ export interface HoneycombParams {
     depth: number;
     angle: number;
     direction: 'inward' | 'outward';
+    holeFillThreshold: number;
+    holeFillEnabled: boolean;
 }
 
 // --------------------------------------------------------------------------------
@@ -46,49 +50,141 @@ function weldGeometry(geo: THREE.BufferGeometry, prec: number = 100000): THREE.B
     return res.toNonIndexed();
 }
 
-function repairMesh(geo: THREE.BufferGeometry): THREE.BufferGeometry {
-    let welded = weldGeometry(geo, 100000);
-    const pos = welded.attributes.position, vertexCount = pos.count, edgeCounts = new Map<string, number>();
-    for (let i = 0; i < vertexCount; i += 3) {
-        for (let j = 0; j < 3; j++) {
-            const v1 = i + j, v2 = i + (j + 1) % 3, h1 = getVKey(pos.getX(v1), pos.getY(v1), pos.getZ(v1)), h2 = getVKey(pos.getX(v2), pos.getY(v2), pos.getZ(v2));
-            const edgeKey = h1 < h2 ? `${h1}|${h2}` : `${h2}|${h1}`;
-            edgeCounts.set(edgeKey, (edgeCounts.get(edgeKey) || 0) + 1);
+function getBarycentric(p: { u: number, v: number }, a: { u: number, v: number }, b: { u: number, v: number }, c: { u: number, v: number }) {
+    const v0u = b.u - a.u, v0v = b.v - a.v, v1u = c.u - a.u, v1v = c.v - a.v, v2u = p.u - a.u, v2v = p.v - a.v;
+    const den = v0u * v1v - v1u * v0v;
+    if (Math.abs(den) < 1e-12) return { wA: 1, wB: 0, wC: 0 };
+    const v = (v2u * v1v - v1u * v2v) / den;
+    const w = (v0u * v2v - v2u * v0v) / den;
+    return { wA: 1 - v - w, wB: v, wC: w };
+}
+
+function repairMesh(geo: THREE.BufferGeometry, threshold: number, enabled: boolean): THREE.BufferGeometry {
+    // Pass 1: Initial weld to bridge microscopic gaps
+    let welded = weldGeometry(geo, 10000);
+    let pos = welded.attributes.position;
+
+    const findBoundaries = (positions: THREE.BufferAttribute | THREE.InterleavedBufferAttribute) => {
+        const edgeMap = new Map<string, { a: number[], b: number[], count: number }>();
+        for (let i = 0; i < positions.count; i += 3) {
+            for (let j = 0; j < 3; j++) {
+                const idx1 = i + j;
+                const idx2 = i + (j + 1) % 3;
+                const v1 = [positions.getX(idx1), positions.getY(idx1), positions.getZ(idx1)];
+                const v2 = [positions.getX(idx2), positions.getY(idx2), positions.getZ(idx2)];
+                const h1 = getVKey(v1[0], v1[1], v1[2]);
+                const h2 = getVKey(v2[0], v2[1], v2[2]);
+                const key = h1 < h2 ? `${h1}|${h2}` : `${h2}|${h1}`;
+                const entry = edgeMap.get(key) || { a: v1, b: v2, count: 0 };
+                entry.count++;
+                edgeMap.set(key, entry);
+            }
         }
-    }
-    const bIdx = new Set<number>();
-    for (let i = 0; i < vertexCount; i += 3) {
-        for (let j = 0; j < 3; j++) {
-            const v1 = i + j, v2 = i + (j + 1) % 3, h1 = getVKey(pos.getX(v1), pos.getY(v1), pos.getZ(v1)), h2 = getVKey(pos.getX(v2), pos.getY(v2), pos.getZ(v2));
-            const edgeKey = h1 < h2 ? `${h1}|${h2}` : `${h2}|${h1}`;
-            if (edgeCounts.get(edgeKey) === 1) { bIdx.add(v1); bIdx.add(v2); }
-        }
-    }
-    if (bIdx.size > 0) {
-        const snapT = 0.2, positions = welded.attributes.position.array as Float32Array, grid = new Map<string, number>();
-        bIdx.forEach(idx => {
-            const x = positions[idx * 3], y = positions[idx * 3 + 1], z = positions[idx * 3 + 2];
-            const gx = Math.floor(x / snapT), gy = Math.floor(y / snapT), gz = Math.floor(z / snapT);
+        const boundaryEdges: { a: number[], b: number[] }[] = [];
+        edgeMap.forEach(e => { if (e.count === 1) boundaryEdges.push({ a: e.a, b: e.b }); });
+        return boundaryEdges;
+    };
+
+    // Pass 2: Snapping boundary vertices to close small T-junctions
+    let bEdges = findBoundaries(pos);
+    if (bEdges.length > 0) {
+        const snapT = 0.15;
+        const positions = welded.attributes.position.array as Float32Array;
+        const grid = new Map<string, number[]>();
+
+        // Index all boundary vertices
+        const bVerts = new Set<string>();
+        bEdges.forEach(e => { bVerts.add(getVKey(e.a[0], e.a[1], e.a[2])); bVerts.add(getVKey(e.b[0], e.b[1], e.b[2])); });
+
+        for (let i = 0; i < pos.count; i++) {
+            const vx = positions[i * 3], vy = positions[i * 3 + 1], vz = positions[i * 3 + 2];
+            const vh = getVKey(vx, vy, vz);
+            if (!bVerts.has(vh)) continue;
+
+            const gx = Math.floor(vx / snapT), gy = Math.floor(vy / snapT), gz = Math.floor(vz / snapT);
+            const key = `${gx},${gy},${gz}`;
+            const cell = grid.get(key) || [];
             let snapped = false;
-            for (let dx = -1; dx <= 1 && !snapped; dx++) {
-                for (let dy = -1; dy <= 1 && !snapped; dy++) {
-                    for (let dz = -1; dz <= 1 && !snapped; dz++) {
-                        const key = `${gx + dx},${gy + dy},${gz + dz}`;
-                        if (grid.has(key)) {
-                            const tIdx = grid.get(key)!; const tx = positions[tIdx * 3], ty = positions[tIdx * 3 + 1], tz = positions[tIdx * 3 + 2];
-                            if ((x - tx) ** 2 + (y - ty) ** 2 + (z - tz) ** 2 < snapT ** 2) {
-                                positions[idx * 3] = tx; positions[idx * 3 + 1] = ty; positions[idx * 3 + 2] = tz;
-                                snapped = true;
-                            }
-                        }
-                    }
+            for (const otherIdx of cell) {
+                const ox = positions[otherIdx * 3], oy = positions[otherIdx * 3 + 1], oz = positions[otherIdx * 3 + 2];
+                if ((vx - ox) ** 2 + (vy - oy) ** 2 + (vz - oz) ** 2 < snapT * snapT) {
+                    positions[i * 3] = ox; positions[i * 3 + 1] = oy; positions[i * 3 + 2] = oz;
+                    snapped = true; break;
                 }
             }
-            if (!snapped) grid.set(`${gx},${gy},${gz}`, idx);
-        });
-        welded = weldGeometry(welded, 100000);
+            if (!snapped) cell.push(i);
+            grid.set(key, cell);
+        }
+        welded = weldGeometry(welded, 10000);
+        pos = welded.attributes.position;
     }
-    return welded;
+
+    // Pass 3: Hole Filling - detect and triangulate open loops
+    if (enabled) {
+        bEdges = findBoundaries(pos);
+        if (bEdges.length > 3) {
+            const adj = new Map<string, string[]>();
+            bEdges.forEach(e => {
+                const h1 = getVKey(e.a[0], e.a[1], e.a[2]), h2 = getVKey(e.b[0], e.b[1], e.b[2]);
+                const a1 = adj.get(h1) || []; a1.push(h2); adj.set(h1, a1);
+                const a2 = adj.get(h2) || []; a2.push(h1); adj.set(h2, a2);
+            });
+
+            const loops: string[][] = [];
+            const visited = new Set<string>();
+            const hToV = new Map<string, number[]>();
+            bEdges.forEach(e => {
+                hToV.set(getVKey(e.a[0], e.a[1], e.a[2]), e.a);
+                hToV.set(getVKey(e.b[0], e.b[1], e.b[2]), e.b);
+            });
+
+            adj.forEach((neighbors, startNode) => {
+                if (visited.has(startNode) || neighbors.length !== 2) return;
+                const loop = [startNode];
+                visited.add(startNode);
+                let curr = neighbors[0];
+                while (curr && curr !== startNode && !visited.has(curr)) {
+                    visited.add(curr);
+                    loop.push(curr);
+                    const nexts = adj.get(curr) || [];
+                    curr = nexts.find(n => !visited.has(n)) || (nexts.length === 2 && nexts.includes(startNode) ? startNode : "");
+                }
+                if (loop.length >= 3) loops.push(loop);
+            });
+
+            if (loops.length > 0) {
+                const extraTris: number[] = [];
+                loops.forEach(loop => {
+                    const points = loop.map(h => hToV.get(h)!);
+                    const center = [0, 0, 0];
+                    points.forEach(p => { center[0] += p[0]; center[1] += p[1]; center[2] += p[2]; });
+                    center[0] /= points.length; center[1] /= points.length; center[2] /= points.length;
+
+                    // Only fill small holes (e.g., radius < 2mm)
+                    let maxDistSq = 0;
+                    for (const p of points) {
+                        const dSq = (p[0] - center[0]) ** 2 + (p[1] - center[1]) ** 2 + (p[2] - center[2]) ** 2;
+                        if (dSq > maxDistSq) maxDistSq = dSq;
+                    }
+
+                    if (maxDistSq < threshold * threshold) { // Configurable threshold
+                        for (let i = 0; i < points.length; i++) {
+                            const p1 = points[i], p2 = points[(i + 1) % points.length];
+                            extraTris.push(p1[0], p1[1], p1[2], p2[0], p2[1], p2[2], center[0], center[1], center[2]);
+                        }
+                    }
+                });
+                if (extraTris.length > 0) {
+                    const oldPos = welded.attributes.position.array as Float32Array;
+                    const combined = new Float32Array(oldPos.length + extraTris.length);
+                    combined.set(oldPos); combined.set(extraTris, oldPos.length);
+                    welded = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(combined, 3));
+                }
+            }
+        }
+    }
+
+    return weldGeometry(welded, 10000);
 }
 
 // --------------------------------------------------------------------------------
@@ -104,6 +200,7 @@ interface ProjectionData {
     unproject: (u: number, v: number, h: number) => THREE.Vector3;
     toRot: (u: number, v: number) => { ur: number; vr: number };
     fromRot: (ur: number, vr: number) => { u: number; v: number };
+    getNormal: (u: number, v: number) => THREE.Vector3;
 }
 
 function createProjectionData(geometry: THREE.BufferGeometry, faceIndices: number[], angleDeg: number): ProjectionData | null {
@@ -147,7 +244,17 @@ function createProjectionData(geometry: THREE.BufferGeometry, faceIndices: numbe
         return toS.multiplyScalar(r).add(upDir.clone().multiplyScalar(v)).add(origin);
     };
 
-    return { avgR, circPhys, depthSign, isPlanar, project, unproject, toRot, fromRot };
+    const getNormal = (u: number, _v: number) => {
+        if (isPlanar) return upDir.clone();
+        const ang = u / avgR;
+        const radial = rightDir.clone().multiplyScalar(Math.cos(ang)).add(fwdDir.clone().multiplyScalar(Math.sin(ang)));
+        // True Normal for a cone (r = m*v + b) is (1, -m) in (radial, up) space
+        const m = fit.m || 0;
+        const norm = radial.clone().addScaledVector(upDir, -m).normalize();
+        return norm.multiplyScalar(depthSign);
+    };
+
+    return { avgR, circPhys, depthSign, isPlanar, project, unproject, toRot, fromRot, getNormal };
 }
 
 // --------------------------------------------------------------------------------
@@ -217,6 +324,7 @@ export function applyKnurling(
             const rotA = proj.toRot(pA_uv.u, pA_uv.v), rotB = proj.toRot(pB_uv.u, pB_uv.v), rotC = proj.toRot(pC_uv.u, pC_uv.v);
             const area = (rotB.ur - rotA.ur) * (rotC.vr - rotA.vr) - (rotB.vr - rotA.vr) * (rotC.ur - rotA.ur);
             const tri = area < 0 ? [{ u: rotA.ur, v: rotA.vr }, { u: rotC.ur, v: rotC.vr }, { u: rotB.ur, v: rotB.vr }] : [{ u: rotA.ur, v: rotA.vr }, { u: rotB.ur, v: rotB.vr }, { u: rotC.ur, v: rotC.vr }];
+            const triVecs = area < 0 ? [pA_vec, pC_vec, pB_vec] : [pA_vec, pB_vec, pC_vec];
 
             const iS = Math.floor(Math.min(tri[0].u, tri[1].u, tri[2].u) / pU) - 1, iE = Math.ceil(Math.max(tri[0].u, tri[1].u, tri[2].u) / pU) + 1;
             const jS = Math.floor(Math.min(tri[0].v, tri[1].v, tri[2].v) / pV) - 1, jE = Math.ceil(Math.max(tri[0].v, tri[1].v, tri[2].v) / pV) + 1;
@@ -239,9 +347,26 @@ export function applyKnurling(
                         let poly = kTri; poly = clip(poly, tri[0], tri[1]); poly = clip(poly, tri[1], tri[2]); poly = clip(poly, tri[2], tri[0]);
                         if (poly.length >= 3) {
                             for (let v = 1; v < poly.length - 1; v++) {
-                                const p0_u = proj.fromRot(poly[0].u, poly[0].v), p1_u = proj.fromRot(poly[v].u, poly[v].v), p2_u = proj.fromRot(poly[v + 1].u, poly[v + 1].v);
-                                const vA = proj.unproject(p0_u.u, p0_u.v, poly[0].h || 0), vB = proj.unproject(p1_u.u, p1_u.v, poly[v].h || 0), vC = proj.unproject(p2_u.u, p2_u.v, poly[v + 1].h || 0);
-                                newPos.push(vA.x, vA.y, vA.z, vB.x, vB.y, vB.z, vC.x, vC.y, vC.z);
+                                const pts = [poly[0], poly[v], poly[v + 1]];
+                                const tempTri: THREE.Vector3[] = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+                                pts.forEach((p, pIdx) => {
+                                    const w = getBarycentric(p, tri[0], tri[1], tri[2]);
+                                    const pBase = new THREE.Vector3().addScaledVector(triVecs[0], w.wA).addScaledVector(triVecs[1], w.wB).addScaledVector(triVecs[2], w.wC);
+                                    const p0_u = proj.fromRot(p.u, p.v);
+                                    const norm = proj.getNormal(p0_u.u, p0_u.v);
+                                    const vFinal = pBase.addScaledVector(norm, p.h);
+                                    if (proj.depthSign < 0) {
+                                        // Reverse order for internal surfaces
+                                        if (pIdx === 0) tempTri[0] = vFinal;
+                                        else if (pIdx === 1) tempTri[1] = vFinal;
+                                        else tempTri[2] = vFinal;
+                                    } else {
+                                        newPos.push(vFinal.x, vFinal.y, vFinal.z);
+                                    }
+                                });
+                                if (proj.depthSign < 0) {
+                                    newPos.push(tempTri[2].x, tempTri[2].y, tempTri[2].z, tempTri[1].x, tempTri[1].y, tempTri[1].z, tempTri[0].x, tempTri[0].y, tempTri[0].z);
+                                }
                             }
                         }
                     });
@@ -254,7 +379,7 @@ export function applyKnurling(
     for (let f = 0; f < posAttr.count / 3; f++) { if (!sel.has(f)) { for (let v = 0; v < 3; v++) { const idx = f * 3 + v; finalR.push(posAttr.getX(idx), posAttr.getY(idx), posAttr.getZ(idx)); } } }
     const combined = new Float32Array(finalR.length + newPos.length); combined.set(finalR); combined.set(newPos, finalR.length);
     const finalGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(combined, 3));
-    const repaired = repairMesh(finalGeo); repaired.computeVertexNormals(); return repaired;
+    const repaired = repairMesh(finalGeo, params.holeFillThreshold, params.holeFillEnabled); repaired.computeVertexNormals(); return repaired;
 }
 
 // --------------------------------------------------------------------------------
@@ -278,10 +403,7 @@ export function applyHoneycomb(
         const symmetries = [0, 30, 60, 90, 120, 150, 180];
         const bestSym = symmetries.reduce((p, c) => Math.abs(c - ang) < Math.abs(p - ang) ? c : p);
 
-        // If we are close to a symmetry angle or if we want a clean wrap anyway
-        // For honeycomb, the period along the circumference depends on the orientation:
-        // - Flat edges vertical (0, 60, 120): Period = cellSize (W)
-        // - Points vertical (30, 90, 150): Period = W * sqrt(3)
+        // Period along the circumference depends on the orientation
         const periodFactor = (bestSym % 60 === 0) ? 1.0 : Math.sqrt(3);
 
         const nUnits = Math.round(proj.circPhys / (W * periodFactor));
@@ -289,7 +411,6 @@ export function applyHoneycomb(
     }
 
     const appliedDepth = direction === 'inward' ? -depth : depth;
-    // Hexagon height from center to vertices
     const s = (W / 2) / (Math.sqrt(3) / 2); // Side length
     const H = 1.5 * s; // Vertical distance between rows
 
@@ -341,11 +462,11 @@ export function applyHoneycomb(
             const rotA = proj.toRot(pA_uv.u, pA_uv.v), rotB = proj.toRot(pB_uv.u, pB_uv.v), rotC = proj.toRot(pC_uv.u, pC_uv.v);
             const area = (rotB.ur - rotA.ur) * (rotC.vr - rotA.vr) - (rotB.vr - rotA.vr) * (rotC.ur - rotA.ur);
             const tri = area < 0 ? [{ u: rotA.ur, v: rotA.vr }, { u: rotC.ur, v: rotC.vr }, { u: rotB.ur, v: rotB.vr }] : [{ u: rotA.ur, v: rotA.vr }, { u: rotB.ur, v: rotB.vr }, { u: rotC.ur, v: rotC.vr }];
+            const triVecs = area < 0 ? [pA_vec, pC_vec, pB_vec] : [pA_vec, pB_vec, pC_vec];
 
             const uMin = Math.min(tri[0].u, tri[1].u, tri[2].u), uMax = Math.max(tri[0].u, tri[1].u, tri[2].u);
             const vMin = Math.min(tri[0].v, tri[1].v, tri[2].v), vMax = Math.max(tri[0].v, tri[1].v, tri[2].v);
 
-            // Honeycomb inner radius (for the walls)
             const rIn = Math.max(0, (W / 2) - t);
             const sIn = rIn / (Math.sqrt(3) / 2);
 
@@ -354,7 +475,6 @@ export function applyHoneycomb(
                     const uc = (i + (Math.abs(j) % 2 === 1 ? 0.5 : 0)) * W;
                     const vc = j * H;
 
-                    // Hexagon outer vertices
                     const vOut = [
                         { u: uc, v: vc + s, h: 0 },
                         { u: uc + W / 2, v: vc + s / 2, h: 0 },
@@ -364,7 +484,6 @@ export function applyHoneycomb(
                         { u: uc - W / 2, v: vc + s / 2, h: 0 }
                     ];
 
-                    // Hexagon inner vertices (displaced)
                     const vInn = [
                         { u: uc, v: vc + sIn, h: appliedDepth },
                         { u: uc + rIn, v: vc + sIn / 2, h: appliedDepth },
@@ -374,14 +493,11 @@ export function applyHoneycomb(
                         { u: uc - rIn, v: vc + sIn / 2, h: appliedDepth }
                     ];
 
-                    // Triangles for the hex pocket
                     const hexTris: { u: number, v: number, h: number }[][] = [];
                     const center = { u: uc, v: vc, h: appliedDepth };
 
                     for (let k = 0; k < 6; k++) {
-                        // Floor
                         hexTris.push([vInn[k], vInn[(k + 1) % 6], center]);
-                        // Walls
                         hexTris.push([vOut[k], vOut[(k + 1) % 6], vInn[k]]);
                         hexTris.push([vOut[(k + 1) % 6], vInn[(k + 1) % 6], vInn[k]]);
                     }
@@ -390,9 +506,25 @@ export function applyHoneycomb(
                         let poly = kTri; poly = clip(poly, tri[0], tri[1]); poly = clip(poly, tri[1], tri[2]); poly = clip(poly, tri[2], tri[0]);
                         if (poly.length >= 3) {
                             for (let v = 1; v < poly.length - 1; v++) {
-                                const p0_u = proj.fromRot(poly[0].u, poly[0].v), p1_u = proj.fromRot(poly[v].u, poly[v].v), p2_u = proj.fromRot(poly[v + 1].u, poly[v + 1].v);
-                                const vA = proj.unproject(p0_u.u, p0_u.v, poly[0].h || 0), vB = proj.unproject(p1_u.u, p1_u.v, poly[v].h || 0), vC = proj.unproject(p2_u.u, p2_u.v, poly[v + 1].h || 0);
-                                newPos.push(vA.x, vA.y, vA.z, vB.x, vB.y, vB.z, vC.x, vC.y, vC.z);
+                                const pts = [poly[0], poly[v], poly[v + 1]];
+                                const tempTri: THREE.Vector3[] = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+                                pts.forEach((p, pIdx) => {
+                                    const w = getBarycentric(p, tri[0], tri[1], tri[2]);
+                                    const pBase = new THREE.Vector3().addScaledVector(triVecs[0], w.wA).addScaledVector(triVecs[1], w.wB).addScaledVector(triVecs[2], w.wC);
+                                    const p0_u = proj.fromRot(p.u, p.v);
+                                    const norm = proj.getNormal(p0_u.u, p0_u.v);
+                                    const vFinal = pBase.addScaledVector(norm, (p as any).h || 0);
+                                    if (proj.depthSign < 0) {
+                                        if (pIdx === 0) tempTri[0] = vFinal;
+                                        else if (pIdx === 1) tempTri[1] = vFinal;
+                                        else tempTri[2] = vFinal;
+                                    } else {
+                                        newPos.push(vFinal.x, vFinal.y, vFinal.z);
+                                    }
+                                });
+                                if (proj.depthSign < 0) {
+                                    newPos.push(tempTri[2].x, tempTri[2].y, tempTri[2].z, tempTri[1].x, tempTri[1].y, tempTri[1].z, tempTri[0].x, tempTri[0].y, tempTri[0].z);
+                                }
                             }
                         }
                     });
@@ -405,7 +537,7 @@ export function applyHoneycomb(
     for (let f = 0; f < posAttr.count / 3; f++) { if (!sel.has(f)) { for (let v = 0; v < 3; v++) { const idx = f * 3 + v; finalR.push(posAttr.getX(idx), posAttr.getY(idx), posAttr.getZ(idx)); } } }
     const combined = new Float32Array(finalR.length + newPos.length); combined.set(finalR); combined.set(newPos, finalR.length);
     const finalGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(combined, 3));
-    const repaired = repairMesh(finalGeo); repaired.computeVertexNormals(); return repaired;
+    const repaired = repairMesh(finalGeo, params.holeFillThreshold, params.holeFillEnabled); repaired.computeVertexNormals(); return repaired;
 }
 
 export function applyDecimate(geo: THREE.BufferGeometry, _faceIndices: number[], _params: any) { return geo; }

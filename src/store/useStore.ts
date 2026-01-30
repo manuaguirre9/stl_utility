@@ -24,8 +24,8 @@ export type HistoryAction =
     | { type: 'REMOVE', modelId: string }
     | { type: 'UPDATE', modelId: string, data: Partial<ModelData> }
     | { type: 'SUBDIVIDE', modelId: string, steps: number, selection: number[] }
-    | { type: 'TEXTURIZE_KNURLING', modelId: string, params: { type: 'knurling', pitch: number, depth: number, angle: number, pattern: KnurlPattern }, selection: number[] }
-    | { type: 'TEXTURIZE_HONEYCOMB', modelId: string, params: { type: 'honeycomb', cellSize: number, wallThickness: number, depth: number, angle: number, direction: 'inward' | 'outward' }, selection: number[] }
+    | { type: 'TEXTURIZE_KNURLING', modelId: string, params: { type: 'knurling', pitch: number, depth: number, angle: number, pattern: KnurlPattern, holeFillThreshold: number, holeFillEnabled: boolean }, selection: number[] }
+    | { type: 'TEXTURIZE_HONEYCOMB', modelId: string, params: { type: 'honeycomb', cellSize: number, wallThickness: number, depth: number, angle: number, direction: 'inward' | 'outward', holeFillThreshold: number, holeFillEnabled: boolean }, selection: number[] }
     | { type: 'TEXTURIZE_DECIMATE', modelId: string, params: { reduction: number }, selection: number[] }
     | { type: 'INITIAL' };
 
@@ -87,8 +87,8 @@ interface AppState {
     setTextureType: (type: 'knurling' | 'honeycomb' | 'decimate') => void;
     subdivideSelection: (modelId: string, steps: number) => void;
     applyTexturize: (modelId: string, params:
-        | { type: 'knurling', pitch: number, depth: number, angle: number, pattern: KnurlPattern }
-        | { type: 'honeycomb', cellSize: number, wallThickness: number, depth: number, angle: number, direction: 'inward' | 'outward' }
+        | { type: 'knurling', pitch: number, depth: number, angle: number, pattern: KnurlPattern, holeFillThreshold: number, holeFillEnabled: boolean }
+        | { type: 'honeycomb', cellSize: number, wallThickness: number, depth: number, angle: number, direction: 'inward' | 'outward', holeFillThreshold: number, holeFillEnabled: boolean }
         | { type: 'decimate', reduction: number }
     ) => void;
     selectAllFaces: (modelId: string) => void;
@@ -477,7 +477,7 @@ export const useStore = create<AppState>((set, get) => ({
         let currentGeometry = model.bufferGeometry;
         const processedOriginals = new Set<number>();
 
-        set({ smartSelection: { ...get().smartSelection, [modelId]: [] }, showMesh: true });
+        set({ smartSelection: { ...get().smartSelection, [modelId]: [] } });
 
         islands.forEach((island, idx) => {
             const translatedIsland = island.map(origIdx => {
@@ -512,7 +512,7 @@ export const useStore = create<AppState>((set, get) => ({
         let currentGeometry = model.bufferGeometry;
         const processedOriginals = new Set<number>();
 
-        set({ smartSelection: { ...get().smartSelection, [modelId]: [] }, showMesh: true });
+        set({ smartSelection: { ...get().smartSelection, [modelId]: [] } });
 
         islands.forEach((island, idx) => {
             const translatedIsland = island.map(origIdx => {
