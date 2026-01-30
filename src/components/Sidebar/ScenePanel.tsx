@@ -4,6 +4,7 @@ import type { KnurlPattern } from '../../utils/texturizeUtils';
 import { Eye, EyeOff, Box, Trash2, Scissors, Grid3X3, X, RotateCcw } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
+import { fitCylinderToSelection } from '../../utils/meshUtils';
 
 interface ScenePanelProps {
     onClose?: () => void;
@@ -62,9 +63,18 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const isHistoryReEdit = selectedHistoryIds.length === 1 && selectedHistoryIds[0] !== 'initial' && reEditParams !== null;
     const selectedModel = models.find((m) => m.id === selectedId);
 
+    const selection = selectedId ? smartSelection[selectedId] || [] : [];
+
+    const cylinderFit = React.useMemo(() => {
+        if (!selectedModel || selection.length === 0 || transformMode !== 'texturize') return null;
+        const fit = fitCylinderToSelection(selectedModel.bufferGeometry, selection);
+        return (fit && !fit.isPlanar && fit.avgR) ? fit : null;
+    }, [selectedId, selection.length, transformMode]);
+
+    const circumference = cylinderFit ? 2 * Math.PI * cylinderFit.avgR! : 0;
+
     // In history re-edit mode, we might not have a face selection in the current live mesh, 
     // but the button should still show if we are browsing history.
-    const selection = selectedId ? smartSelection[selectedId] || [] : [];
     const selectionCount = selection.length;
     const hasSelection = selectionCount > 0;
 
@@ -377,13 +387,14 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                             <div style={{ marginBottom: '16px' }}>
                                 <div style={{
                                     fontSize: '11px',
-                                    color: 'var(--text-muted)',
+                                    color: 'white',
                                     textTransform: 'uppercase',
                                     letterSpacing: '0.05em',
-                                    backgroundColor: 'var(--bg-input)',
+                                    backgroundColor: 'var(--accent-primary)',
                                     padding: '4px 8px',
                                     borderRadius: '4px',
-                                    display: 'inline-block'
+                                    display: 'inline-block',
+                                    fontWeight: 'bold'
                                 }}>
                                     Active: {textureType === 'decimate' ? 'Simplify' : textureType}
                                 </div>
@@ -490,54 +501,10 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
 
                                 {textureType === 'honeycomb' && (
                                     <>
+                                        {/* 1. Pattern Angle */}
                                         <div>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Cell Size</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '500' }}>{cellSize}</span>
-                                            </div>
-                                            <input
-                                                type="range"
-                                                min="1"
-                                                max="20"
-                                                step="0.5"
-                                                value={cellSize}
-                                                onChange={(e) => setCellSize(parseFloat(e.target.value))}
-                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
-                                            />
-                                        </div>
-                                        <div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>2. Wall Thickness (mm)</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{wallThickness.toFixed(2)}</span>
-                                            </div>
-                                            <input
-                                                type="range"
-                                                min="0.05"
-                                                max="2.0"
-                                                step="0.05"
-                                                value={wallThickness}
-                                                onChange={(e) => setWallThickness(parseFloat(e.target.value))}
-                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
-                                            />
-                                        </div>
-                                        <div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>3. Depth (mm)</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{depth.toFixed(2)}</span>
-                                            </div>
-                                            <input
-                                                type="range"
-                                                min="0.1"
-                                                max="5"
-                                                step="0.1"
-                                                value={depth}
-                                                onChange={(e) => setDepth(parseFloat(e.target.value))}
-                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
-                                            />
-                                        </div>
-                                        <div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>4. Pattern Angle</label>
+                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>1. Pattern Angle</label>
                                                 <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{angle}°</span>
                                             </div>
                                             <div style={{ display: 'flex', gap: '4px' }}>
@@ -561,6 +528,96 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                                 ))}
                                             </div>
                                         </div>
+
+                                        {/* 2. Cell Size */}
+                                        <div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>2. Cell Size (mm)</label>
+                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{cellSize.toFixed(2)}</span>
+                                            </div>
+                                            <input
+                                                type="range"
+                                                min="1"
+                                                max="20"
+                                                step="0.1"
+                                                value={cellSize}
+                                                onChange={(e) => setCellSize(parseFloat(e.target.value))}
+                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                            />
+                                            {cylinderFit && (
+                                                <div style={{ marginTop: '8px', padding: '10px', backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: '6px', border: '1px solid rgba(0,210,255,0.3)' }}>
+                                                    <div style={{ fontSize: '11px', color: '#00d2ff', fontWeight: 'bold', marginBottom: '6px', letterSpacing: '0.05em' }}>PERFECT CELL SIZE</div>
+                                                    <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginBottom: '8px', opacity: 0.8 }}>CYLINDER DETECTED (C: {circumference.toFixed(1)}mm)</div>
+                                                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                                                        {[0, 1].map(isAlt => {
+                                                            const ang = ((angle % 180) + 180) % 180;
+                                                            const sym = [0, 30, 60, 90, 120, 150, 180].reduce((p, c) => Math.abs(c - ang) < Math.abs(p - ang) ? c : p);
+                                                            const factor = (sym % 60 === 0) ? 1.0 : Math.sqrt(3);
+                                                            const n = Math.round(circumference / (cellSize * factor)) + (isAlt ? 1 : 0);
+                                                            const sugW = circumference / (Math.max(1, n) * factor);
+                                                            if (sugW < 1 || sugW > 25) return null;
+                                                            return (
+                                                                <button
+                                                                    key={isAlt}
+                                                                    onClick={() => setCellSize(sugW)}
+                                                                    style={{
+                                                                        padding: '4px 8px',
+                                                                        fontSize: '10px',
+                                                                        backgroundColor: 'rgba(0, 210, 255, 0.2)',
+                                                                        color: '#00d2ff',
+                                                                        border: '1px solid rgba(0, 210, 255, 0.4)',
+                                                                        borderRadius: '4px',
+                                                                        cursor: 'pointer',
+                                                                        fontWeight: '500',
+                                                                        transition: 'all 0.2s'
+                                                                    }}
+                                                                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(0, 210, 255, 0.3)'}
+                                                                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'rgba(0, 210, 255, 0.2)'}
+                                                                >
+                                                                    N={n} → {sugW.toFixed(2)}mm
+                                                                </button>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {/* 3. Wall Thickness */}
+                                        <div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>3. Wall Thickness (mm)</label>
+                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{wallThickness.toFixed(2)}</span>
+                                            </div>
+                                            <input
+                                                type="range"
+                                                min="0.05"
+                                                max="2.0"
+                                                step="0.05"
+                                                value={wallThickness}
+                                                onChange={(e) => setWallThickness(parseFloat(e.target.value))}
+                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                            />
+                                        </div>
+
+                                        {/* 4. Depth */}
+                                        <div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>4. Depth (mm)</label>
+                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{depth.toFixed(2)}</span>
+                                            </div>
+                                            <input
+                                                type="range"
+                                                min="0.1"
+                                                max="5"
+                                                step="0.1"
+                                                value={depth}
+                                                onChange={(e) => setDepth(parseFloat(e.target.value))}
+                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                            />
+                                        </div>
+
+                                        {/* 5. Direction */}
                                         <div>
                                             <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>5. Direction</label>
                                             <div style={{ display: 'flex', gap: '4px' }}>

@@ -269,7 +269,25 @@ export function applyHoneycomb(
     const proj = createProjectionData(geometry, faceIndices, params.angle);
     if (!proj) return geometry;
 
-    const { cellSize: W, wallThickness: t, depth, direction } = params;
+    let { cellSize: W, wallThickness: t, depth, direction, angle: userAngle } = params;
+
+    // 1. Technical Wrap Adjustment (Cylinders/Cones)
+    if (!proj.isPlanar && proj.circPhys > 0) {
+        // Find nearest technical symmetry angle
+        const ang = ((userAngle % 180) + 180) % 180;
+        const symmetries = [0, 30, 60, 90, 120, 150, 180];
+        const bestSym = symmetries.reduce((p, c) => Math.abs(c - ang) < Math.abs(p - ang) ? c : p);
+
+        // If we are close to a symmetry angle or if we want a clean wrap anyway
+        // For honeycomb, the period along the circumference depends on the orientation:
+        // - Flat edges vertical (0, 60, 120): Period = cellSize (W)
+        // - Points vertical (30, 90, 150): Period = W * sqrt(3)
+        const periodFactor = (bestSym % 60 === 0) ? 1.0 : Math.sqrt(3);
+
+        const nUnits = Math.round(proj.circPhys / (W * periodFactor));
+        W = proj.circPhys / (Math.max(1, nUnits) * periodFactor);
+    }
+
     const appliedDepth = direction === 'inward' ? -depth : depth;
     // Hexagon height from center to vertices
     const s = (W / 2) / (Math.sqrt(3) / 2); // Side length
