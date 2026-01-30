@@ -24,8 +24,8 @@ export type HistoryAction =
     | { type: 'REMOVE', modelId: string }
     | { type: 'UPDATE', modelId: string, data: Partial<ModelData> }
     | { type: 'SUBDIVIDE', modelId: string, steps: number, selection: number[] }
-    | { type: 'TEXTURIZE_KNURLING', modelId: string, params: { pitch: number, depth: number, angle: number, pattern: KnurlPattern }, selection: number[] }
-    | { type: 'TEXTURIZE_HONEYCOMB', modelId: string, params: { cellSize: number, wallThickness: number, depth: number }, selection: number[] }
+    | { type: 'TEXTURIZE_KNURLING', modelId: string, params: { type: 'knurling', pitch: number, depth: number, angle: number, pattern: KnurlPattern }, selection: number[] }
+    | { type: 'TEXTURIZE_HONEYCOMB', modelId: string, params: { type: 'honeycomb', cellSize: number, wallThickness: number, depth: number, angle: number, direction: 'inward' | 'outward' }, selection: number[] }
     | { type: 'TEXTURIZE_DECIMATE', modelId: string, params: { reduction: number }, selection: number[] }
     | { type: 'INITIAL' };
 
@@ -88,7 +88,7 @@ interface AppState {
     subdivideSelection: (modelId: string, steps: number) => void;
     applyTexturize: (modelId: string, params:
         | { type: 'knurling', pitch: number, depth: number, angle: number, pattern: KnurlPattern }
-        | { type: 'honeycomb', cellSize: number, wallThickness: number, depth: number }
+        | { type: 'honeycomb', cellSize: number, wallThickness: number, depth: number, angle: number, direction: 'inward' | 'outward' }
         | { type: 'decimate', reduction: number }
     ) => void;
     selectAllFaces: (modelId: string) => void;
@@ -140,13 +140,13 @@ export const useStore = create<AppState>((set, get) => ({
                 if (action.type === 'SUBDIVIDE') {
                     toolMode = 'subdivide'; params = { steps: action.steps };
                 } else if (action.type === 'TEXTURIZE_KNURLING') {
-                    toolMode = 'texturize'; params = { type: 'knurling', ...action.params };
+                    toolMode = 'texturize'; params = { ...action.params };
                     set({ textureType: 'knurling' });
                 } else if (action.type === 'TEXTURIZE_HONEYCOMB') {
-                    toolMode = 'texturize'; params = { type: 'honeycomb', ...action.params };
+                    toolMode = 'texturize'; params = { ...action.params };
                     set({ textureType: 'honeycomb' });
                 } else if (action.type === 'TEXTURIZE_DECIMATE') {
-                    toolMode = 'texturize'; params = { type: 'decimate', ...action.params };
+                    toolMode = 'texturize'; params = { ...action.params };
                     set({ textureType: 'decimate' });
                 }
 
@@ -302,13 +302,13 @@ export const useStore = create<AppState>((set, get) => ({
         if (action.type === 'SUBDIVIDE') {
             toolMode = 'subdivide'; params = { steps: action.steps }; selection = action.selection; modelId = action.modelId;
         } else if (action.type === 'TEXTURIZE_KNURLING') {
-            toolMode = 'texturize'; params = { type: 'knurling', ...action.params }; selection = action.selection; modelId = action.modelId;
+            toolMode = 'texturize'; params = { ...action.params }; selection = action.selection; modelId = action.modelId;
             set({ textureType: 'knurling' });
         } else if (action.type === 'TEXTURIZE_HONEYCOMB') {
-            toolMode = 'texturize'; params = { type: 'honeycomb', ...action.params }; selection = action.selection; modelId = action.modelId;
+            toolMode = 'texturize'; params = { ...action.params }; selection = action.selection; modelId = action.modelId;
             set({ textureType: 'honeycomb' });
         } else if (action.type === 'TEXTURIZE_DECIMATE') {
-            toolMode = 'texturize'; params = { type: 'decimate', ...action.params }; selection = action.selection; modelId = action.modelId;
+            toolMode = 'texturize'; params = { ...action.params }; selection = action.selection; modelId = action.modelId;
             set({ textureType: 'decimate' });
         }
 

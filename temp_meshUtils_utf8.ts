@@ -1,16 +1,5 @@
+﻿
 import * as THREE from 'three';
-
-export interface CylinderFit {
-    isPlanar: boolean;
-    avgN?: THREE.Vector3;
-    up?: THREE.Vector3;
-    axisOrigin?: THREE.Vector3;
-    m?: number;
-    b?: number;
-    avgR?: number;
-    origin?: THREE.Vector3;
-    isFlipped?: boolean;
-}
 
 /**
  * Subdivides a set of triangles.
@@ -345,90 +334,4 @@ export function getContiguousIslands(
     }
 
     return islands;
-}
-
-/**
- * Fits a cylinder or a plane to a selection of faces.
- * Core geometric engine for aligned texture projection.
- */
-export function fitCylinderToSelection(
-    geometry: THREE.BufferGeometry,
-    faceIndices: number[]
-): CylinderFit | null {
-    if (faceIndices.length === 0) return null;
-    const posAttr = geometry.attributes.position;
-    const points: THREE.Vector3[] = [];
-    const normals: THREE.Vector3[] = [];
-    const centroids: THREE.Vector3[] = [];
-
-    for (const fIdx of faceIndices) {
-        const off = fIdx * 3;
-        const vA = new THREE.Vector3().fromBufferAttribute(posAttr, off + 0);
-        const vB = new THREE.Vector3().fromBufferAttribute(posAttr, off + 1);
-        const vC = new THREE.Vector3().fromBufferAttribute(posAttr, off + 2);
-        const center = new THREE.Vector3().add(vA).add(vB).add(vC).divideScalar(3);
-        const n = new THREE.Vector3().crossVectors(new THREE.Vector3().subVectors(vB, vA), new THREE.Vector3().subVectors(vC, vA)).normalize();
-        points.push(vA, vB, vC); normals.push(n); centroids.push(center);
-    }
-
-    if (centroids.length === 0) return null;
-
-    const avgN = new THREE.Vector3(); normals.forEach(n => avgN.add(n)); avgN.divideScalar(normals.length);
-    const avgN_norm = avgN.clone().normalize();
-    let nVar = 0; normals.forEach(n => nVar += (1 - Math.abs(n.dot(avgN_norm)))); nVar /= normals.length;
-    const isPlanar = nVar < 0.01;
-
-    if (isPlanar) {
-        const origin = centroids.reduce((acc, c) => acc.add(c), new THREE.Vector3()).divideScalar(centroids.length);
-        return { isPlanar: true, avgN: avgN_norm, origin, axisOrigin: origin, up: avgN_norm, avgR: 1, m: 0, b: 1, isFlipped: false };
-    }
-
-    let axis = new THREE.Vector3(1, 1, 1).normalize();
-    const meanN = avgN.clone(); // Raw mean vector [0..1]
-    let mxx = 0, mxy = 0, mxz = 0, myy = 0, myz = 0, mzz = 0;
-    normals.forEach(n => {
-        const dx = n.x - meanN.x, dy = n.y - meanN.y, dz = n.z - meanN.z;
-        mxx += dx * dx; mxy += dx * dy; mxz += dx * dz; myy += dy * dy; myz += dy * dz; mzz += dz * dz;
-    });
-    const trace = mxx + myy + mzz;
-    for (let i = 0; i < 20; i++) {
-        const nx = (trace - mxx) * axis.x - mxy * axis.y - mxz * axis.z;
-        const ny = -mxy * axis.x + (trace - myy) * axis.y - myz * axis.z;
-        const nz = -mxz * axis.x - myz * axis.y + (trace - mzz) * axis.z;
-        axis.set(nx, ny, nz).normalize();
-    }
-    const up = axis;
-    const right = new THREE.Vector3();
-    if (Math.abs(up.y) < 0.9) right.set(0, 1, 0).cross(up).normalize(); else right.set(1, 0, 0).cross(up).normalize();
-    const fwd = new THREE.Vector3().crossVectors(up, right).normalize();
-
-    let sUU = 0, sUV = 0, sVV = 0, bU = 0, bV = 0;
-    centroids.forEach((q, idx) => {
-        const n = normals[idx].clone().projectOnPlane(up).normalize();
-        if (n.lengthSq() < 0.001) return;
-        const qu = q.dot(right), qv = q.dot(fwd), nu = n.dot(right), nv = n.dot(fwd);
-        const aa = 1 - nu * nu, ab = -nu * nv, ac = 1 - nv * nv;
-        sUU += aa; sUV += ab; sVV += ac; bU += aa * qu + ab * qv; bV += ab * qu + ac * qv;
-    });
-    const det = sUU * sVV - sUV * sUV;
-    const axisOrigin = (Math.abs(det) > 1e-8) ? right.clone().multiplyScalar((sVV * bU - sUV * bV) / det).add(fwd.clone().multiplyScalar((sUU * bV - sUV * bU) / det)) : centroids[0].clone();
-
-    const pCyl = points.map(p => { const v = p.clone().sub(axisOrigin); return { h: v.dot(up), r: v.clone().projectOnPlane(up).length() }; });
-    let sumH = 0, sumR = 0, sumHH = 0, sumHR = 0, cnt = pCyl.length;
-    pCyl.forEach(p => { sumH += p.h; sumR += p.r; sumHH += p.h * p.h; sumHR += p.h * p.r; });
-    const den = (cnt * sumHH - sumH * sumH);
-    const m = Math.abs(den) > 1e-9 ? (cnt * sumHR - sumH * sumR) / den : 0;
-    const b = (sumR - m * sumH) / cnt;
-
-    let nrSum = 0;
-    centroids.forEach((c, idx) => {
-        const toS = c.clone().sub(axisOrigin).projectOnPlane(up).normalize();
-        nrSum += normals[idx].dot(toS);
-    });
-    const isFlipped = nrSum < 0;
-
-    const avgH = (centroids.reduce((s, c) => s + c.dot(up), 0) / centroids.length) - axisOrigin.dot(up);
-    const avgR = b + m * avgH;
-
-    return { isPlanar: false, up, axisOrigin, m, b, avgR, isFlipped };
 }

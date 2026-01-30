@@ -33,11 +33,12 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     // Texturize states
     const [pitch, setPitch] = useState(2.0);
     const [depth, setDepth] = useState(0.5);
-    const [angle, setAngle] = useState(45);
+    const [angle, setAngle] = useState(0);
     const [cellSize, setCellSize] = useState(5.0);
     const [wallThickness, setWallThickness] = useState(0.5);
     const [knurlPattern, setKnurlPattern] = useState<KnurlPattern>('diamond');
     const [reductionRatio, setReductionRatio] = useState(0.5);
+    const [direction, setDirection] = useState<'inward' | 'outward'>('inward');
 
     // Sync with re-edit params
     React.useEffect(() => {
@@ -53,6 +54,7 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                 if (reEditParams.cellSize !== undefined) setCellSize(reEditParams.cellSize);
                 if (reEditParams.wallThickness !== undefined) setWallThickness(reEditParams.wallThickness);
                 if (reEditParams.reduction !== undefined) setReductionRatio(reEditParams.reduction);
+                if (reEditParams.direction) setDirection(reEditParams.direction);
             }
         }
     }, [reEditParams, transformMode]);
@@ -75,7 +77,7 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
             // Recalculate existing operation
             const params = transformMode === 'subdivide'
                 ? { steps: subdivideSteps }
-                : { type: textureType, pitch, depth, angle, pattern: knurlPattern, cellSize, wallThickness, reduction: reductionRatio };
+                : { type: textureType, pitch, depth, angle, pattern: knurlPattern, cellSize, wallThickness, reduction: reductionRatio, direction };
             recalculateHistoryItem(selectedHistoryIds[0], params);
         } else if (selectedModel) {
             // Apply new operation
@@ -85,7 +87,7 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                 if (textureType === 'knurling') {
                     applyTexturize(selectedModel.id, { type: 'knurling', pitch, depth, angle, pattern: knurlPattern });
                 } else if (textureType === 'honeycomb') {
-                    applyTexturize(selectedModel.id, { type: 'honeycomb', cellSize, wallThickness, depth });
+                    applyTexturize(selectedModel.id, { type: 'honeycomb', cellSize, wallThickness, depth, angle, direction });
                 } else {
                     applyTexturize(selectedModel.id, { type: 'decimate', reduction: reductionRatio });
                 }
@@ -505,8 +507,23 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                         </div>
                                         <div>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Depth (mm)</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '500' }}>{depth}</span>
+                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>2. Wall Thickness (mm)</label>
+                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{wallThickness.toFixed(2)}</span>
+                                            </div>
+                                            <input
+                                                type="range"
+                                                min="0.05"
+                                                max="2.0"
+                                                step="0.05"
+                                                value={wallThickness}
+                                                onChange={(e) => setWallThickness(parseFloat(e.target.value))}
+                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                            />
+                                        </div>
+                                        <div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>3. Depth (mm)</label>
+                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{depth.toFixed(2)}</span>
                                             </div>
                                             <input
                                                 type="range"
@@ -517,6 +534,56 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                                 onChange={(e) => setDepth(parseFloat(e.target.value))}
                                                 style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
                                             />
+                                        </div>
+                                        <div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>4. Pattern Angle</label>
+                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{angle}°</span>
+                                            </div>
+                                            <div style={{ display: 'flex', gap: '4px' }}>
+                                                {[0, 30, 45, 90].map((a) => (
+                                                    <button
+                                                        key={a}
+                                                        onClick={() => setAngle(a)}
+                                                        style={{
+                                                            flex: 1,
+                                                            padding: '8px',
+                                                            fontSize: '11px',
+                                                            borderRadius: '4px',
+                                                            backgroundColor: angle === a ? 'var(--accent-primary)' : 'var(--bg-input)',
+                                                            color: 'white',
+                                                            border: '1px solid var(--border-color)',
+                                                            cursor: 'pointer'
+                                                        }}
+                                                    >
+                                                        {a}°
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>5. Direction</label>
+                                            <div style={{ display: 'flex', gap: '4px' }}>
+                                                {(['inward', 'outward'] as const).map((d) => (
+                                                    <button
+                                                        key={d}
+                                                        onClick={() => setDirection(d)}
+                                                        style={{
+                                                            flex: 1,
+                                                            padding: '8px',
+                                                            fontSize: '11px',
+                                                            borderRadius: '4px',
+                                                            backgroundColor: direction === d ? 'var(--accent-primary)' : 'var(--bg-input)',
+                                                            color: 'white',
+                                                            border: '1px solid var(--border-color)',
+                                                            cursor: 'pointer',
+                                                            textTransform: 'capitalize'
+                                                        }}
+                                                    >
+                                                        {d}
+                                                    </button>
+                                                ))}
+                                            </div>
                                         </div>
                                     </>
                                 )}
