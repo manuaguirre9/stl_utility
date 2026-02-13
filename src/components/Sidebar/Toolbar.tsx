@@ -1,6 +1,6 @@
 import React, { useRef } from 'react';
 import { useStore } from '../../store/useStore';
-import { Trash2, Upload, Download, MousePointerClick, Scissors, Grid3X3, Diamond, Hexagon, Minimize2 } from 'lucide-react';
+import { Trash2, Upload, Download, MousePointerClick, Scissors, Grid3X3, Diamond, Hexagon, Minimize2, Waves } from 'lucide-react';
 import { exportSceneToSTL } from '../../utils/exportUtils';
 import { v4 as uuidv4 } from 'uuid';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
@@ -184,6 +184,13 @@ export const Toolbar: React.FC = () => {
                             onClick={() => setTextureType('honeycomb')}
                             icon={Hexagon}
                             title="Honeycomb"
+                        />
+                        <ToolButton
+                            small
+                            active={textureType === 'fuzzy'}
+                            onClick={() => setTextureType('fuzzy')}
+                            icon={Waves}
+                            title="Fuzzy Skin"
                         />
                         <ToolButton
                             small

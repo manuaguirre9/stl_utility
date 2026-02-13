@@ -24,6 +24,14 @@ export interface HoneycombParams {
     holeFillEnabled: boolean;
 }
 
+export interface FuzzySkinParams {
+    type: 'fuzzy';
+    thickness: number;
+    pointDistance: number;
+    holeFillThreshold: number;
+    holeFillEnabled: boolean;
+}
+
 // --------------------------------------------------------------------------------
 // SHARED UTILITIES
 // --------------------------------------------------------------------------------
@@ -530,6 +538,85 @@ export function applyHoneycomb(
                     });
                 }
             }
+        }
+    });
+
+    const finalR: number[] = []; const sel = new Set(faceIndices);
+    for (let f = 0; f < posAttr.count / 3; f++) { if (!sel.has(f)) { for (let v = 0; v < 3; v++) { const idx = f * 3 + v; finalR.push(posAttr.getX(idx), posAttr.getY(idx), posAttr.getZ(idx)); } } }
+    const combined = new Float32Array(finalR.length + newPos.length); combined.set(finalR); combined.set(newPos, finalR.length);
+    const finalGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(combined, 3));
+    const repaired = repairMesh(finalGeo, params.holeFillThreshold, params.holeFillEnabled); repaired.computeVertexNormals(); return repaired;
+}
+
+// --------------------------------------------------------------------------------
+// FUZZY SKIN IMPLEMENTATION
+// --------------------------------------------------------------------------------
+
+export function applyFuzzySkin(
+    geometry: THREE.BufferGeometry,
+    faceIndices: number[],
+    params: FuzzySkinParams
+): THREE.BufferGeometry {
+    const islands = getContiguousIslands(geometry, faceIndices);
+    const posAttr = geometry.attributes.position;
+    const newPos: number[] = [];
+
+    const distSq = (x1: number, y1: number, z1: number, x2: number, y2: number, z2: number) => {
+        return (x1 - x2) ** 2 + (y1 - y2) ** 2 + (z1 - z2) ** 2;
+    };
+
+    islands.forEach(islandIndices => {
+        const islandPos = new Float32Array(islandIndices.length * 9);
+        islandIndices.forEach((fIdx, i) => {
+            const off = fIdx * 3;
+            islandPos[i * 9 + 0] = posAttr.getX(off); islandPos[i * 9 + 1] = posAttr.getY(off); islandPos[i * 9 + 2] = posAttr.getZ(off);
+            islandPos[i * 9 + 3] = posAttr.getX(off + 1); islandPos[i * 9 + 4] = posAttr.getY(off + 1); islandPos[i * 9 + 5] = posAttr.getZ(off + 1);
+            islandPos[i * 9 + 6] = posAttr.getX(off + 2); islandPos[i * 9 + 7] = posAttr.getY(off + 2); islandPos[i * 9 + 8] = posAttr.getZ(off + 2);
+        });
+
+        // 1. Homogeneous Density Calculation
+        let currentSubPos = islandPos;
+        const targetSq = params.pointDistance * params.pointDistance;
+        const MAX_STEPS = 6;
+
+        for (let s = 0; s < MAX_STEPS; s++) {
+            let needsMore = false;
+            const triCount = currentSubPos.length / 9;
+            for (let i = 0; i < triCount; i++) {
+                const o = i * 9;
+                const d12 = distSq(currentSubPos[o], currentSubPos[o + 1], currentSubPos[o + 2], currentSubPos[o + 3], currentSubPos[o + 4], currentSubPos[o + 5]);
+                const d23 = distSq(currentSubPos[o + 3], currentSubPos[o + 4], currentSubPos[o + 5], currentSubPos[o + 6], currentSubPos[o + 7], currentSubPos[o + 8]);
+                const d31 = distSq(currentSubPos[o + 6], currentSubPos[o + 7], currentSubPos[o + 8], currentSubPos[o + 0], currentSubPos[o + 1], currentSubPos[o + 2]);
+                if (Math.max(d12, d23, d31) > targetSq) {
+                    needsMore = true;
+                    break;
+                }
+            }
+            if (!needsMore) break;
+            currentSubPos = subdivideTriangles(currentSubPos, 1);
+        }
+
+        // 2. Mesh Context for jitter
+        let subGeo = new THREE.BufferGeometry();
+        subGeo.setAttribute('position', new THREE.BufferAttribute(currentSubPos, 3));
+        subGeo = weldGeometry(subGeo, 10000);
+        subGeo.computeVertexNormals();
+
+        const positions = subGeo.attributes.position.array as any as Float32Array;
+        const normals = subGeo.attributes.normal.array as any as Float32Array;
+
+        // 3. Application of Noise (Random Displacement)
+        for (let i = 0; i < positions.length / 3; i++) {
+            const noise = (Math.random() - 0.5) * 2 * params.thickness;
+            positions[i * 3] += normals[i * 3] * noise;
+            positions[i * 3 + 1] += normals[i * 3 + 1] * noise;
+            positions[i * 3 + 2] += normals[i * 3 + 2] * noise;
+        }
+
+        // 4. Conversion to final positions
+        const finalIslandPos = subGeo.toNonIndexed().attributes.position.array as any as Float32Array;
+        for (let i = 0; i < finalIslandPos.length; i++) {
+            newPos.push(finalIslandPos[i]);
         }
     });
 

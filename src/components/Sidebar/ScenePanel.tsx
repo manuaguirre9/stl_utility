@@ -42,6 +42,8 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const [direction, setDirection] = useState<'inward' | 'outward'>('inward');
     const [holeFillThreshold, setHoleFillThreshold] = useState(1.0);
     const [holeFillEnabled, setHoleFillEnabled] = useState(true);
+    const [fuzzyThickness, setFuzzyThickness] = useState(0.2);
+    const [pointDistance, setPointDistance] = useState(0.1);
 
     // Sync with re-edit params
     React.useEffect(() => {
@@ -60,6 +62,8 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                 if (reEditParams.direction) setDirection(reEditParams.direction);
                 if (reEditParams.holeFillThreshold !== undefined) setHoleFillThreshold(reEditParams.holeFillThreshold);
                 if (reEditParams.holeFillEnabled !== undefined) setHoleFillEnabled(reEditParams.holeFillEnabled);
+                if (reEditParams.thickness !== undefined) setFuzzyThickness(reEditParams.thickness);
+                if (reEditParams.pointDistance !== undefined) setPointDistance(reEditParams.pointDistance);
             }
         }
     }, [reEditParams, transformMode]);
@@ -91,7 +95,7 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
             // Recalculate existing operation
             const params = transformMode === 'subdivide'
                 ? { steps: subdivideSteps }
-                : { type: textureType, pitch, depth, angle, pattern: knurlPattern, cellSize, wallThickness, reduction: reductionRatio, direction, holeFillThreshold, holeFillEnabled };
+                : { type: textureType, pitch, depth, angle, pattern: knurlPattern, cellSize, wallThickness, reduction: reductionRatio, direction, holeFillThreshold, holeFillEnabled, thickness: fuzzyThickness, pointDistance };
             recalculateHistoryItem(selectedHistoryIds[0], params);
         } else if (selectedModel) {
             // Apply new operation
@@ -102,6 +106,8 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                     applyTexturize(selectedModel.id, { type: 'knurling', pitch, depth, angle, pattern: knurlPattern, holeFillThreshold, holeFillEnabled });
                 } else if (textureType === 'honeycomb') {
                     applyTexturize(selectedModel.id, { type: 'honeycomb', cellSize, wallThickness, depth, angle, direction, holeFillThreshold, holeFillEnabled });
+                } else if (textureType === 'fuzzy') {
+                    applyTexturize(selectedModel.id, { type: 'fuzzy', thickness: fuzzyThickness, pointDistance, holeFillThreshold, holeFillEnabled });
                 } else if (textureType === 'decimate') {
                     applyTexturize(selectedModel.id, { type: 'decimate', reduction: reductionRatio });
                 }
@@ -649,7 +655,46 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                     </>
                                 )}
 
-                                {(textureType === 'knurling' || textureType === 'honeycomb') && (
+                                {textureType === 'fuzzy' && (
+                                    <>
+                                        {/* 1. Thickness */}
+                                        <div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>1. Noise Thickness (mm)</label>
+                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{fuzzyThickness.toFixed(2)}</span>
+                                            </div>
+                                            <input
+                                                type="range"
+                                                min="0.05"
+                                                max="1.5"
+                                                step="0.05"
+                                                value={fuzzyThickness}
+                                                onChange={(e) => setFuzzyThickness(parseFloat(e.target.value))}
+                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                            />
+                                        </div>
+
+                                        {/* 2. Point Distance (Density) */}
+                                        <div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>2. Noise Density (mm dist)</label>
+                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{pointDistance.toFixed(2)}</span>
+                                            </div>
+                                            <input
+                                                type="range"
+                                                min="0.05"
+                                                max="1.0"
+                                                step="0.05"
+                                                value={pointDistance}
+                                                onChange={(e) => setPointDistance(parseFloat(e.target.value))}
+                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                            />
+                                            <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px', fontStyle: 'italic' }}>Lower values = Higher resolution noise</div>
+                                        </div>
+                                    </>
+                                )}
+
+                                {(textureType === 'knurling' || textureType === 'honeycomb' || textureType === 'fuzzy') && (
                                     <div style={{ padding: '12px', backgroundColor: 'rgba(255, 107, 0, 0.05)', borderRadius: '4px', border: '1px dashed rgba(255, 107, 0, 0.2)' }}>
                                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                                             <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Anti-Tearing Repair</label>

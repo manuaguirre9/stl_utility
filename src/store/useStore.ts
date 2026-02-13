@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import * as THREE from 'three';
 import { v4 as uuidv4 } from 'uuid';
 import { subdivideSelectedFaces, getContiguousIslands } from '../utils/meshUtils';
-import { applyKnurling, applyHoneycomb, applyDecimate } from '../utils/texturizeUtils';
+import { applyKnurling, applyHoneycomb, applyFuzzySkin, applyDecimate } from '../utils/texturizeUtils';
 import type { KnurlPattern } from '../utils/texturizeUtils';
 
 export interface ModelData {
@@ -26,6 +26,7 @@ export type HistoryAction =
     | { type: 'SUBDIVIDE', modelId: string, steps: number, selection: number[] }
     | { type: 'TEXTURIZE_KNURLING', modelId: string, params: { type: 'knurling', pitch: number, depth: number, angle: number, pattern: KnurlPattern, holeFillThreshold: number, holeFillEnabled: boolean }, selection: number[] }
     | { type: 'TEXTURIZE_HONEYCOMB', modelId: string, params: { type: 'honeycomb', cellSize: number, wallThickness: number, depth: number, angle: number, direction: 'inward' | 'outward', holeFillThreshold: number, holeFillEnabled: boolean }, selection: number[] }
+    | { type: 'TEXTURIZE_FUZZY', modelId: string, params: { type: 'fuzzy', thickness: number, pointDistance: number, holeFillThreshold: number, holeFillEnabled: boolean }, selection: number[] }
     | { type: 'TEXTURIZE_DECIMATE', modelId: string, params: { reduction: number }, selection: number[] }
     | { type: 'INITIAL' };
 
@@ -47,7 +48,7 @@ interface AppState {
     showClassification: boolean;
     classificationAngle: number;
     smartSelection: Record<string, number[]>;
-    textureType: 'knurling' | 'honeycomb' | 'decimate';
+    textureType: 'knurling' | 'honeycomb' | 'fuzzy' | 'decimate';
 
     // History State
     history: HistoryEntry[];
@@ -84,11 +85,12 @@ interface AppState {
     addToSmartSelection: (modelId: string, indices: number[]) => void;
     removeFromSmartSelection: (modelId: string, indices: number[]) => void;
     clearSmartSelection: () => void;
-    setTextureType: (type: 'knurling' | 'honeycomb' | 'decimate') => void;
+    setTextureType: (type: 'knurling' | 'honeycomb' | 'fuzzy' | 'decimate') => void;
     subdivideSelection: (modelId: string, steps: number) => void;
     applyTexturize: (modelId: string, params:
         | { type: 'knurling', pitch: number, depth: number, angle: number, pattern: KnurlPattern, holeFillThreshold: number, holeFillEnabled: boolean }
         | { type: 'honeycomb', cellSize: number, wallThickness: number, depth: number, angle: number, direction: 'inward' | 'outward', holeFillThreshold: number, holeFillEnabled: boolean }
+        | { type: 'fuzzy', thickness: number, pointDistance: number, holeFillThreshold: number, holeFillEnabled: boolean }
         | { type: 'decimate', reduction: number }
     ) => void;
     selectAllFaces: (modelId: string) => void;
@@ -145,6 +147,9 @@ export const useStore = create<AppState>((set, get) => ({
                 } else if (action.type === 'TEXTURIZE_HONEYCOMB') {
                     toolMode = 'texturize'; params = { ...action.params };
                     set({ textureType: 'honeycomb' });
+                } else if (action.type === 'TEXTURIZE_FUZZY') {
+                    toolMode = 'texturize'; params = { ...action.params };
+                    set({ textureType: 'fuzzy' });
                 } else if (action.type === 'TEXTURIZE_DECIMATE') {
                     toolMode = 'texturize'; params = { ...action.params };
                     set({ textureType: 'decimate' });
@@ -385,6 +390,16 @@ export const useStore = create<AppState>((set, get) => ({
                     model.bufferGeometry = applyHoneycomb(model.bufferGeometry, action.selection, action.params);
                     model.meshVersion++;
                 }
+                if (model) {
+                    model.bufferGeometry = applyHoneycomb(model.bufferGeometry, action.selection, action.params);
+                    model.meshVersion++;
+                }
+            } else if (action.type === 'TEXTURIZE_FUZZY') {
+                const model = currentModels.find(m => m.id === action.modelId);
+                if (model) {
+                    model.bufferGeometry = applyFuzzySkin(model.bufferGeometry, action.selection, action.params);
+                    model.meshVersion++;
+                }
             } else if (action.type === 'TEXTURIZE_DECIMATE') {
                 const model = currentModels.find(m => m.id === action.modelId);
                 if (model) {
@@ -526,6 +541,8 @@ export const useStore = create<AppState>((set, get) => ({
                 nextGeometry = applyKnurling(currentGeometry, translatedIsland, params);
             } else if (params.type === 'honeycomb') {
                 nextGeometry = applyHoneycomb(currentGeometry, translatedIsland, params);
+            } else if (params.type === 'fuzzy') {
+                nextGeometry = applyFuzzySkin(currentGeometry, translatedIsland, params);
             } else if (params.type === 'decimate') {
                 nextGeometry = applyDecimate(currentGeometry, translatedIsland, params);
             }
@@ -537,13 +554,18 @@ export const useStore = create<AppState>((set, get) => ({
                 models: state.models.map(m => m.id === modelId ? { ...m, bufferGeometry: currentGeometry, meshVersion: m.meshVersion + 1 } : m)
             }));
 
-            get().recordHistory(`Texturize ${params.type} - Surface ${idx + 1}`,
-                params.type === 'knurling'
-                    ? { type: 'TEXTURIZE_KNURLING', modelId, params: { ...params }, selection: translatedIsland }
-                    : params.type === 'honeycomb'
-                        ? { type: 'TEXTURIZE_HONEYCOMB', modelId, params: { ...params }, selection: translatedIsland }
-                        : { type: 'TEXTURIZE_DECIMATE', modelId, params: { ...params }, selection: translatedIsland }
-            );
+            let historyAction: HistoryAction;
+            if (params.type === 'knurling') {
+                historyAction = { type: 'TEXTURIZE_KNURLING', modelId, params: { ...params } as any, selection: translatedIsland };
+            } else if (params.type === 'honeycomb') {
+                historyAction = { type: 'TEXTURIZE_HONEYCOMB', modelId, params: { ...params } as any, selection: translatedIsland };
+            } else if (params.type === 'fuzzy') {
+                historyAction = { type: 'TEXTURIZE_FUZZY', modelId, params: { ...params } as any, selection: translatedIsland };
+            } else {
+                historyAction = { type: 'TEXTURIZE_DECIMATE', modelId, params: { ...params } as any, selection: translatedIsland };
+            }
+
+            get().recordHistory(`Texturize ${params.type} - Surface ${idx + 1}`, historyAction);
         });
     },
 
