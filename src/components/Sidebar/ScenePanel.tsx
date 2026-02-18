@@ -33,9 +33,11 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
 
     // Texturize states
     const [pitch, setPitch] = useState(2.0);
+    const [referencePitch, setReferencePitch] = useState(2.0);
     const [depth, setDepth] = useState(0.5);
     const [angle, setAngle] = useState(0);
     const [cellSize, setCellSize] = useState(5.0);
+    const [referenceCellSize, setReferenceCellSize] = useState(5.0);
     const [wallThickness, setWallThickness] = useState(0.5);
     const [knurlPattern, setKnurlPattern] = useState<KnurlPattern>('diamond');
     const [reductionRatio, setReductionRatio] = useState(0.5);
@@ -52,11 +54,11 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                 if (reEditParams.steps !== undefined) setSubdivideSteps(reEditParams.steps);
             } else if (transformMode === 'texturize') {
                 if (reEditParams.type) setTextureType(reEditParams.type);
-                if (reEditParams.pitch !== undefined) setPitch(reEditParams.pitch);
+                if (reEditParams.pitch !== undefined) { setPitch(reEditParams.pitch); setReferencePitch(reEditParams.pitch); }
                 if (reEditParams.depth !== undefined) setDepth(reEditParams.depth);
                 if (reEditParams.angle !== undefined) setAngle(reEditParams.angle);
                 if (reEditParams.pattern) setKnurlPattern(reEditParams.pattern);
-                if (reEditParams.cellSize !== undefined) setCellSize(reEditParams.cellSize);
+                if (reEditParams.cellSize !== undefined) { setCellSize(reEditParams.cellSize); setReferenceCellSize(reEditParams.cellSize); }
                 if (reEditParams.wallThickness !== undefined) setWallThickness(reEditParams.wallThickness);
                 if (reEditParams.reduction !== undefined) setReductionRatio(reEditParams.reduction);
                 if (reEditParams.direction) setDirection(reEditParams.direction);
@@ -483,9 +485,13 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                                 type="range"
                                                 min="0.1"
                                                 max="10"
-                                                step="0.01"
+                                                step="0.0001"
                                                 value={pitch}
-                                                onChange={(e) => setPitch(parseFloat(e.target.value))}
+                                                onChange={(e) => {
+                                                    const val = parseFloat(e.target.value);
+                                                    setPitch(val);
+                                                    setReferencePitch(val);
+                                                }}
                                                 style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
                                             />
                                             {cylinderFit && (
@@ -494,11 +500,27 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                                     <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginBottom: '8px', opacity: 0.8 }}>CYLINDER DETECTED (C: {circumference.toFixed(1)}mm)</div>
                                                     <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
                                                         {(() => {
-                                                            const n_nom = Math.round(circumference / pitch);
-                                                            const n_base = n_nom % 2 === 0 ? n_nom : n_nom + 1;
-                                                            const candidates = Array.from(new Set([n_base - 2, n_base, n_base + 2])).filter(n => n >= 2);
-                                                            return candidates.map(n => {
+                                                            const isEvenPattern = knurlPattern === 'diamond' || knurlPattern === 'square';
+                                                            // Use referencePitch for stability
+                                                            const n_nom = Math.round(circumference / referencePitch);
+
+                                                            // For diamond/square, we strictly need EVEN subdivisions to close the pattern
+                                                            // For straight/diagonal, any integer works
+                                                            let n_base = n_nom;
+                                                            if (isEvenPattern && n_base % 2 !== 0) n_base += 1;
+
+                                                            const candidates = new Set<number>();
+                                                            candidates.add(n_base);
+                                                            candidates.add(n_base + (isEvenPattern ? 2 : 1));
+                                                            candidates.add(n_base - (isEvenPattern ? 2 : 1));
+
+                                                            const sorted = Array.from(candidates).filter(n => n >= 2).sort((a, b) => a - b);
+
+                                                            return sorted.map(n => {
                                                                 const sugP = circumference / n;
+                                                                // Check if current pitch is closely matching this suggestion
+                                                                const isSelected = Math.abs(pitch - sugP) < 0.001;
+
                                                                 return (
                                                                     <button
                                                                         key={n}
@@ -506,16 +528,16 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                                                         style={{
                                                                             padding: '4px 8px',
                                                                             fontSize: '10px',
-                                                                            backgroundColor: 'rgba(0, 210, 255, 0.2)',
-                                                                            color: '#00d2ff',
-                                                                            border: '1px solid rgba(0, 210, 255, 0.4)',
+                                                                            backgroundColor: isSelected ? 'var(--accent-primary)' : 'rgba(0, 210, 255, 0.2)',
+                                                                            color: isSelected ? 'white' : '#00d2ff',
+                                                                            border: isSelected ? '1px solid var(--accent-primary)' : '1px solid rgba(0, 210, 255, 0.4)',
                                                                             borderRadius: '4px',
                                                                             cursor: 'pointer',
                                                                             fontWeight: '500',
                                                                             transition: 'all 0.2s'
                                                                         }}
-                                                                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(0, 210, 255, 0.3)'}
-                                                                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'rgba(0, 210, 255, 0.2)'}
+                                                                        onMouseEnter={(e) => !isSelected && (e.currentTarget.style.backgroundColor = 'rgba(0, 210, 255, 0.3)')}
+                                                                        onMouseLeave={(e) => !isSelected && (e.currentTarget.style.backgroundColor = 'rgba(0, 210, 255, 0.2)')}
                                                                     >
                                                                         N={n} → {sugP.toFixed(2)}mm
                                                                     </button>
@@ -588,7 +610,11 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                                 max="20"
                                                 step="0.1"
                                                 value={cellSize}
-                                                onChange={(e) => setCellSize(parseFloat(e.target.value))}
+                                                onChange={(e) => {
+                                                    const val = parseFloat(e.target.value);
+                                                    setCellSize(val);
+                                                    setReferenceCellSize(val);
+                                                }}
                                                 style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
                                             />
                                             {cylinderFit && (
@@ -600,9 +626,15 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                                             const ang = ((angle % 180) + 180) % 180;
                                                             const sym = [0, 30, 60, 90, 120, 150, 180].reduce((p, c) => Math.abs(c - ang) < Math.abs(p - ang) ? c : p);
                                                             const factor = (sym % 60 === 0) ? 1.0 : Math.sqrt(3);
-                                                            const n = Math.round(circumference / (cellSize * factor)) + (isAlt ? 1 : 0);
+                                                            // Use referenceCellSize for stability
+                                                            const n = Math.round(circumference / (referenceCellSize * factor)) + (isAlt ? 1 : 0);
                                                             const sugW = circumference / (Math.max(1, n) * factor);
+
                                                             if (sugW < 1 || sugW > 25) return null;
+
+                                                            // Check if current cellSize is closely matching this suggestion
+                                                            const isSelected = Math.abs(cellSize - sugW) < 0.001;
+
                                                             return (
                                                                 <button
                                                                     key={isAlt}
@@ -610,16 +642,16 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                                                     style={{
                                                                         padding: '4px 8px',
                                                                         fontSize: '10px',
-                                                                        backgroundColor: 'rgba(0, 210, 255, 0.2)',
-                                                                        color: '#00d2ff',
-                                                                        border: '1px solid rgba(0, 210, 255, 0.4)',
+                                                                        backgroundColor: isSelected ? 'var(--accent-primary)' : 'rgba(0, 210, 255, 0.2)',
+                                                                        color: isSelected ? 'white' : '#00d2ff',
+                                                                        border: isSelected ? '1px solid var(--accent-primary)' : '1px solid rgba(0, 210, 255, 0.4)',
                                                                         borderRadius: '4px',
                                                                         cursor: 'pointer',
                                                                         fontWeight: '500',
                                                                         transition: 'all 0.2s'
                                                                     }}
-                                                                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(0, 210, 255, 0.3)'}
-                                                                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'rgba(0, 210, 255, 0.2)'}
+                                                                    onMouseEnter={(e) => !isSelected && (e.currentTarget.style.backgroundColor = 'rgba(0, 210, 255, 0.3)')}
+                                                                    onMouseLeave={(e) => !isSelected && (e.currentTarget.style.backgroundColor = 'rgba(0, 210, 255, 0.2)')}
                                                                 >
                                                                     N={n} → {sugW.toFixed(2)}mm
                                                                 </button>
