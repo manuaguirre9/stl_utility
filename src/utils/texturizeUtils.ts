@@ -575,7 +575,7 @@ export function applyFuzzySkin(
         });
 
         // 1. Homogeneous Density Calculation
-        let currentSubPos = islandPos;
+        let currentSubPos: Float32Array<ArrayBufferLike> = islandPos;
         const targetSq = params.pointDistance * params.pointDistance;
         const MAX_STEPS = 6;
 
@@ -593,7 +593,7 @@ export function applyFuzzySkin(
                 }
             }
             if (!needsMore) break;
-            currentSubPos = subdivideTriangles(currentSubPos, 1);
+            currentSubPos = subdivideTriangles(currentSubPos, 1) as Float32Array;
         }
 
         // 2. Mesh Context for jitter
