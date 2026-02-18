@@ -43,7 +43,7 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const [holeFillThreshold, setHoleFillThreshold] = useState(1.0);
     const [holeFillEnabled, setHoleFillEnabled] = useState(true);
     const [fuzzyThickness, setFuzzyThickness] = useState(0.2);
-    const [pointDistance, setPointDistance] = useState(0.1);
+    const [pointDistance, setPointDistance] = useState(0.2);
 
     // Sync with re-edit params
     React.useEffect(() => {
@@ -665,8 +665,8 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                             </div>
                                             <input
                                                 type="range"
-                                                min="0.05"
-                                                max="1.5"
+                                                min="0.2"
+                                                max="5.0"
                                                 step="0.05"
                                                 value={fuzzyThickness}
                                                 onChange={(e) => setFuzzyThickness(parseFloat(e.target.value))}
@@ -682,8 +682,8 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                             </div>
                                             <input
                                                 type="range"
-                                                min="0.05"
-                                                max="1.0"
+                                                min="0.2"
+                                                max="5.0"
                                                 step="0.05"
                                                 value={pointDistance}
                                                 onChange={(e) => setPointDistance(parseFloat(e.target.value))}
