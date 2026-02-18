@@ -488,6 +488,43 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                                 onChange={(e) => setPitch(parseFloat(e.target.value))}
                                                 style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
                                             />
+                                            {cylinderFit && (
+                                                <div style={{ marginTop: '8px', padding: '10px', backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: '6px', border: '1px solid rgba(0,210,255,0.3)' }}>
+                                                    <div style={{ fontSize: '11px', color: '#00d2ff', fontWeight: 'bold', marginBottom: '6px', letterSpacing: '0.05em' }}>PERFECT PITCH</div>
+                                                    <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginBottom: '8px', opacity: 0.8 }}>CYLINDER DETECTED (C: {circumference.toFixed(1)}mm)</div>
+                                                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                                                        {(() => {
+                                                            const n_nom = Math.round(circumference / pitch);
+                                                            const n_base = n_nom % 2 === 0 ? n_nom : n_nom + 1;
+                                                            const candidates = Array.from(new Set([n_base - 2, n_base, n_base + 2])).filter(n => n >= 2);
+                                                            return candidates.map(n => {
+                                                                const sugP = circumference / n;
+                                                                return (
+                                                                    <button
+                                                                        key={n}
+                                                                        onClick={() => setPitch(sugP)}
+                                                                        style={{
+                                                                            padding: '4px 8px',
+                                                                            fontSize: '10px',
+                                                                            backgroundColor: 'rgba(0, 210, 255, 0.2)',
+                                                                            color: '#00d2ff',
+                                                                            border: '1px solid rgba(0, 210, 255, 0.4)',
+                                                                            borderRadius: '4px',
+                                                                            cursor: 'pointer',
+                                                                            fontWeight: '500',
+                                                                            transition: 'all 0.2s'
+                                                                        }}
+                                                                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'rgba(0, 210, 255, 0.3)'}
+                                                                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'rgba(0, 210, 255, 0.2)'}
+                                                                    >
+                                                                        N={n} → {sugP.toFixed(2)}mm
+                                                                    </button>
+                                                                );
+                                                            });
+                                                        })()}
+                                                    </div>
+                                                </div>
+                                            )}
                                         </div>
 
                                         {/* 4. Depth */}
