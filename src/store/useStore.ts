@@ -17,7 +17,7 @@ export interface ModelData {
     meshVersion: number;
 }
 
-export type TransformMode = 'smart' | 'subdivide' | 'texturize' | null;
+export type TransformMode = 'smart' | 'subdivide' | 'texturize' | 'stitching' | null;
 
 export type HistoryAction =
     | { type: 'IMPORT', model: ModelData }
@@ -28,6 +28,7 @@ export type HistoryAction =
     | { type: 'TEXTURIZE_HONEYCOMB', modelId: string, params: { type: 'honeycomb', cellSize: number, wallThickness: number, depth: number, angle: number, direction: 'inward' | 'outward', holeFillThreshold: number, holeFillEnabled: boolean }, selection: number[] }
     | { type: 'TEXTURIZE_FUZZY', modelId: string, params: { type: 'fuzzy', thickness: number, pointDistance: number, holeFillThreshold: number, holeFillEnabled: boolean }, selection: number[] }
     | { type: 'TEXTURIZE_DECIMATE', modelId: string, params: { reduction: number }, selection: number[] }
+    | { type: 'STITCH_REPAIR', modelId: string }
     | { type: 'INITIAL' };
 
 interface HistoryEntry {
@@ -93,6 +94,7 @@ interface AppState {
         | { type: 'fuzzy', thickness: number, pointDistance: number, holeFillThreshold: number, holeFillEnabled: boolean }
         | { type: 'decimate', reduction: number }
     ) => void;
+    applyStitchRepair: (modelId: string) => void;
     selectAllFaces: (modelId: string) => void;
 }
 
@@ -185,7 +187,7 @@ export const useStore = create<AppState>((set, get) => ({
         });
     },
 
-    deleteHistoryEntry: (ids) => {
+    deleteHistoryEntry: async (ids) => {
         const { history } = get();
         const idList = Array.isArray(ids) ? ids : [ids];
         const idsToRemove = new Set(idList);
@@ -199,7 +201,7 @@ export const useStore = create<AppState>((set, get) => ({
         let currentSelection: Record<string, number[]> = {};
         const rebuiltHistory: HistoryEntry[] = [];
 
-        newHistoryActions.forEach((item) => {
+        for (const item of newHistoryActions) {
             const action = item.action;
             if (action.type === 'INITIAL') {
                 currentModels = [];
@@ -219,13 +221,13 @@ export const useStore = create<AppState>((set, get) => ({
             } else if (action.type === 'TEXTURIZE_KNURLING') {
                 const model = currentModels.find(m => m.id === action.modelId);
                 if (model) {
-                    model.bufferGeometry = applyKnurling(model.bufferGeometry, action.selection, action.params);
+                    model.bufferGeometry = await applyKnurling(model.bufferGeometry, action.selection, action.params);
                     model.meshVersion++;
                 }
             } else if (action.type === 'TEXTURIZE_HONEYCOMB') {
                 const model = currentModels.find(m => m.id === action.modelId);
                 if (model) {
-                    model.bufferGeometry = applyHoneycomb(model.bufferGeometry, action.selection, action.params);
+                    model.bufferGeometry = await applyHoneycomb(model.bufferGeometry, action.selection, action.params);
                     model.meshVersion++;
                 }
             } else if (action.type === 'TEXTURIZE_DECIMATE') {
@@ -244,7 +246,7 @@ export const useStore = create<AppState>((set, get) => ({
                 smartSelection: JSON.parse(JSON.stringify(currentSelection)),
                 timestamp: Date.now()
             });
-        });
+        }
 
         const lastEntry = rebuiltHistory[rebuiltHistory.length - 1];
         set({
@@ -331,7 +333,7 @@ export const useStore = create<AppState>((set, get) => ({
         }
     },
 
-    recalculateHistoryItem: (id, newParams) => {
+    recalculateHistoryItem: async (id, newParams) => {
         const { history, historyIndex, preReEditIndex, selectedId } = get();
         const editIndex = history.findIndex(h => h.id === id);
         if (editIndex <= 0) return;
@@ -361,7 +363,7 @@ export const useStore = create<AppState>((set, get) => ({
         let currentSelection: Record<string, number[]> = {};
         const rebuiltHistory: HistoryEntry[] = [];
 
-        actionsToReplay.forEach((item) => {
+        for (const item of actionsToReplay) {
             const action = item.action as any;
             if (action.type === 'INITIAL') {
                 currentModels = [];
@@ -381,29 +383,32 @@ export const useStore = create<AppState>((set, get) => ({
             } else if (action.type === 'TEXTURIZE_KNURLING') {
                 const model = currentModels.find(m => m.id === action.modelId);
                 if (model) {
-                    model.bufferGeometry = applyKnurling(model.bufferGeometry, action.selection, action.params);
+                    model.bufferGeometry = await applyKnurling(model.bufferGeometry, action.selection, action.params);
                     model.meshVersion++;
                 }
             } else if (action.type === 'TEXTURIZE_HONEYCOMB') {
                 const model = currentModels.find(m => m.id === action.modelId);
                 if (model) {
-                    model.bufferGeometry = applyHoneycomb(model.bufferGeometry, action.selection, action.params);
-                    model.meshVersion++;
-                }
-                if (model) {
-                    model.bufferGeometry = applyHoneycomb(model.bufferGeometry, action.selection, action.params);
+                    model.bufferGeometry = await applyHoneycomb(model.bufferGeometry, action.selection, action.params);
                     model.meshVersion++;
                 }
             } else if (action.type === 'TEXTURIZE_FUZZY') {
                 const model = currentModels.find(m => m.id === action.modelId);
                 if (model) {
-                    model.bufferGeometry = applyFuzzySkin(model.bufferGeometry, action.selection, action.params);
+                    model.bufferGeometry = await applyFuzzySkin(model.bufferGeometry, action.selection, action.params);
                     model.meshVersion++;
                 }
             } else if (action.type === 'TEXTURIZE_DECIMATE') {
                 const model = currentModels.find(m => m.id === action.modelId);
                 if (model) {
                     model.bufferGeometry = applyDecimate(model.bufferGeometry, action.selection, action.params);
+                    model.meshVersion++;
+                }
+            } else if (action.type === 'STITCH_REPAIR') {
+                const model = currentModels.find(m => m.id === action.modelId);
+                if (model) {
+                    const { repairGeometry } = await import('../utils/meshRepairService');
+                    model.bufferGeometry = await repairGeometry(model.bufferGeometry);
                     model.meshVersion++;
                 }
             }
@@ -416,7 +421,7 @@ export const useStore = create<AppState>((set, get) => ({
                 smartSelection: JSON.parse(JSON.stringify(currentSelection)),
                 timestamp: Date.now()
             });
-        });
+        }
 
         // 3. Restore User Context
         const finalRestoreIndex = Math.min(originalScrubberIndex, rebuiltHistory.length - 1);
@@ -515,7 +520,7 @@ export const useStore = create<AppState>((set, get) => ({
         });
     },
 
-    applyTexturize: (modelId, params) => {
+    applyTexturize: async (modelId, params) => {
         const model = get().models.find(m => m.id === modelId);
         if (!model) return;
         const selection = get().smartSelection[modelId] || [];
@@ -529,7 +534,8 @@ export const useStore = create<AppState>((set, get) => ({
 
         set({ smartSelection: { ...get().smartSelection, [modelId]: [] } });
 
-        islands.forEach((island, idx) => {
+        for (let idx = 0; idx < islands.length; idx++) {
+            const island = islands[idx];
             const translatedIsland = island.map(origIdx => {
                 let shift = 0;
                 processedOriginals.forEach(o => { if (o < origIdx) shift++; });
@@ -538,11 +544,11 @@ export const useStore = create<AppState>((set, get) => ({
 
             let nextGeometry = currentGeometry;
             if (params.type === 'knurling') {
-                nextGeometry = applyKnurling(currentGeometry, translatedIsland, params);
+                nextGeometry = await applyKnurling(currentGeometry, translatedIsland, params);
             } else if (params.type === 'honeycomb') {
-                nextGeometry = applyHoneycomb(currentGeometry, translatedIsland, params);
+                nextGeometry = await applyHoneycomb(currentGeometry, translatedIsland, params);
             } else if (params.type === 'fuzzy') {
-                nextGeometry = applyFuzzySkin(currentGeometry, translatedIsland, params);
+                nextGeometry = await applyFuzzySkin(currentGeometry, translatedIsland, params);
             } else if (params.type === 'decimate') {
                 nextGeometry = applyDecimate(currentGeometry, translatedIsland, params);
             }
@@ -566,16 +572,53 @@ export const useStore = create<AppState>((set, get) => ({
             }
 
             get().recordHistory(`Texturize ${params.type} - Surface ${idx + 1}`, historyAction);
-        });
+        }
     },
+
+    applyStitchRepair: async (modelId) => {
+        const { models, history, selectedHistoryIds, recalculateHistoryItem } = get();
+        const model = models.find((m) => m.id === modelId);
+        if (!model) return;
+
+        // If we are editing a past history item
+        if (selectedHistoryIds.length === 1 && selectedHistoryIds[0] !== 'initial') {
+            const histItem = history.find(h => h.id === selectedHistoryIds[0]);
+            if (histItem && histItem.action.type === 'STITCH_REPAIR') {
+                recalculateHistoryItem(histItem.id, {});
+                return;
+            }
+        }
+
+        try {
+            const { repairGeometry } = await import('../utils/meshRepairService');
+
+            const repairedGeo = await repairGeometry(model.bufferGeometry);
+
+            // IMPORTANT: Update the model FIRST, then record history.
+            // recordHistory snapshots current models, so the model must be
+            // updated before calling it, otherwise the snapshot contains the
+            // OLD (un-repaired) geometry.
+            const newModel = { ...model, bufferGeometry: repairedGeo, meshVersion: model.meshVersion + 1 };
+
+            set((state) => ({
+                models: state.models.map((m) => (m.id === modelId ? newModel : m)),
+                // Stay in stitching mode so user can see updated stats
+            }));
+
+            // Now record history — this captures the repaired model
+            get().recordHistory('Stitch Repair', { type: 'STITCH_REPAIR', modelId });
+        } catch (error) {
+            console.error("Stitch repair failed:", error);
+            alert("Repair failed. See console for details.");
+        }
+    },
+
 
     selectAllFaces: (modelId) => {
         const model = get().models.find(m => m.id === modelId);
         if (!model) return;
-        const faceCount = model.bufferGeometry.attributes.position.count / 3;
-        const allIndices = Array.from({ length: faceCount }, (_, i) => i);
-        set((state) => ({
-            smartSelection: { ...state.smartSelection, [modelId]: allIndices }
-        }));
+        const count = model.bufferGeometry.attributes.position.count / 3;
+        const allIndices = Array.from({ length: count }, (_, i) => i);
+        get().setSmartSelection(modelId, allIndices);
     },
 }));

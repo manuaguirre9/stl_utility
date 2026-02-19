@@ -432,3 +432,40 @@ export function fitCylinderToSelection(
 
     return { isPlanar: false, up, axisOrigin, m, b, avgR, isFlipped };
 }
+
+/**
+ * Analyzes the mesh for topological issues.
+ * Returns the count of open edges (boundary) and non-manifold edges.
+ */
+export function analyzeMesh(geometry: THREE.BufferGeometry): { openEdges: number, nonManifoldEdges: number } {
+    const posAttr = geometry.attributes.position;
+    const prec = 10000;
+    const vKey = (idx: number) =>
+        `${Math.round(posAttr.getX(idx) * prec)},${Math.round(posAttr.getY(idx) * prec)},${Math.round(posAttr.getZ(idx) * prec)}`;
+
+    const edgeCounts = new Map<string, number>();
+
+    for (let fIdx = 0; fIdx < posAttr.count / 3; fIdx++) {
+        const off = fIdx * 3;
+        const k0 = vKey(off), k1 = vKey(off + 1), k2 = vKey(off + 2);
+
+        const processEdge = (keyA: string, keyB: string) => {
+            const key = keyA < keyB ? `${keyA}:${keyB}` : `${keyB}:${keyA}`;
+            edgeCounts.set(key, (edgeCounts.get(key) || 0) + 1);
+        };
+
+        processEdge(k0, k1);
+        processEdge(k1, k2);
+        processEdge(k2, k0);
+    }
+
+    let openEdges = 0;
+    let nonManifoldEdges = 0;
+
+    for (const count of edgeCounts.values()) {
+        if (count === 1) openEdges++;
+        if (count > 2) nonManifoldEdges++;
+    }
+
+    return { openEdges, nonManifoldEdges };
+}

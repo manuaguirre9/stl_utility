@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { getContiguousIslands, subdivideTriangles, fitCylinderToSelection } from './meshUtils';
+import { repairGeometry } from './meshRepairService';
 
 export type KnurlPattern = 'diamond' | 'straight' | 'diagonal' | 'square';
 
@@ -36,10 +37,6 @@ export interface FuzzySkinParams {
 // SHARED UTILITIES
 // --------------------------------------------------------------------------------
 
-function getVKey(x: number, y: number, z: number): string {
-    return `${Math.round(x * 100000)},${Math.round(y * 100000)},${Math.round(z * 100000)}`;
-}
-
 function weldGeometry(geo: THREE.BufferGeometry, prec: number = 100000): THREE.BufferGeometry {
     const pos = geo.attributes.position, vMap = new Map<string, number>(), nPos: number[] = [], indices: number[] = [];
     for (let i = 0; i < pos.count; i++) {
@@ -67,132 +64,73 @@ function getBarycentric(p: { u: number, v: number }, a: { u: number, v: number }
     return { wA: 1 - v - w, wB: v, wC: w };
 }
 
-function repairMesh(geo: THREE.BufferGeometry, threshold: number, enabled: boolean): THREE.BufferGeometry {
-    // Pass 1: Initial weld to bridge microscopic gaps
-    let welded = weldGeometry(geo, 10000);
-    let pos = welded.attributes.position;
+function distSq(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number): number {
+    return (x1 - x2) ** 2 + (y1 - y2) ** 2 + (z1 - z2) ** 2;
+}
 
-    const findBoundaries = (positions: THREE.BufferAttribute | THREE.InterleavedBufferAttribute) => {
-        const edgeMap = new Map<string, { a: number[], b: number[], count: number }>();
-        for (let i = 0; i < positions.count; i += 3) {
-            for (let j = 0; j < 3; j++) {
-                const idx1 = i + j;
-                const idx2 = i + (j + 1) % 3;
-                const v1 = [positions.getX(idx1), positions.getY(idx1), positions.getZ(idx1)];
-                const v2 = [positions.getX(idx2), positions.getY(idx2), positions.getZ(idx2)];
-                const h1 = getVKey(v1[0], v1[1], v1[2]);
-                const h2 = getVKey(v2[0], v2[1], v2[2]);
-                const key = h1 < h2 ? `${h1}|${h2}` : `${h2}|${h1}`;
-                const entry = edgeMap.get(key) || { a: v1, b: v2, count: 0 };
-                entry.count++;
-                edgeMap.set(key, entry);
+// --------------------------------------------------------------------------------
+// BOUNDARY UTILS
+// --------------------------------------------------------------------------------
+
+
+
+/**
+ * Returns an array of boundary line segments (start, end) for geometric checking.
+ * Allows fixing gaps by snapping/stitching to ANY point on a boundary edge.
+ */
+function getBoundarySegments(geometry: THREE.BufferGeometry, faceIndices: number[]): { a: THREE.Vector3, b: THREE.Vector3, lenSq: number, ab: THREE.Vector3 }[] {
+    const posAttr = geometry.attributes.position;
+    const prec = 10000;
+    const vKey = (idx: number) => `${Math.round(posAttr.getX(idx) * prec)},${Math.round(posAttr.getY(idx) * prec)},${Math.round(posAttr.getZ(idx) * prec)}`;
+
+    const edgeMap = new Map<string, { a: THREE.Vector3, b: THREE.Vector3, count: number }>();
+
+    faceIndices.forEach(fIdx => {
+        const off = fIdx * 3;
+        const v0 = new THREE.Vector3(posAttr.getX(off), posAttr.getY(off), posAttr.getZ(off));
+        const v1 = new THREE.Vector3(posAttr.getX(off + 1), posAttr.getY(off + 1), posAttr.getZ(off + 1));
+        const v2 = new THREE.Vector3(posAttr.getX(off + 2), posAttr.getY(off + 2), posAttr.getZ(off + 2));
+
+        const k0 = vKey(off), k1 = vKey(off + 1), k2 = vKey(off + 2);
+
+        const processEdge = (keyA: string, keyB: string, vecA: THREE.Vector3, vecB: THREE.Vector3) => {
+            const key = keyA < keyB ? `${keyA}:${keyB}` : `${keyB}:${keyA}`;
+            if (!edgeMap.has(key)) {
+                edgeMap.set(key, { a: vecA, b: vecB, count: 0 });
             }
-        }
-        const boundaryEdges: { a: number[], b: number[] }[] = [];
-        edgeMap.forEach(e => { if (e.count === 1) boundaryEdges.push({ a: e.a, b: e.b }); });
-        return boundaryEdges;
-    };
+            edgeMap.get(key)!.count++;
+        };
 
-    // Pass 2: Snapping boundary vertices to close small T-junctions
-    let bEdges = findBoundaries(pos);
-    if (bEdges.length > 0) {
-        const snapT = 0.15;
-        const positions = welded.attributes.position.array as Float32Array;
-        const grid = new Map<string, number[]>();
+        processEdge(k0, k1, v0, v1);
+        processEdge(k1, k2, v1, v2);
+        processEdge(k2, k0, v2, v0);
+    });
 
-        // Index all boundary vertices
-        const bVerts = new Set<string>();
-        bEdges.forEach(e => { bVerts.add(getVKey(e.a[0], e.a[1], e.a[2])); bVerts.add(getVKey(e.b[0], e.b[1], e.b[2])); });
-
-        for (let i = 0; i < pos.count; i++) {
-            const vx = positions[i * 3], vy = positions[i * 3 + 1], vz = positions[i * 3 + 2];
-            const vh = getVKey(vx, vy, vz);
-            if (!bVerts.has(vh)) continue;
-
-            const gx = Math.floor(vx / snapT), gy = Math.floor(vy / snapT), gz = Math.floor(vz / snapT);
-            const key = `${gx},${gy},${gz}`;
-            const cell = grid.get(key) || [];
-            let snapped = false;
-            for (const otherIdx of cell) {
-                const ox = positions[otherIdx * 3], oy = positions[otherIdx * 3 + 1], oz = positions[otherIdx * 3 + 2];
-                if ((vx - ox) ** 2 + (vy - oy) ** 2 + (vz - oz) ** 2 < snapT * snapT) {
-                    positions[i * 3] = ox; positions[i * 3 + 1] = oy; positions[i * 3 + 2] = oz;
-                    snapped = true; break;
-                }
-            }
-            if (!snapped) cell.push(i);
-            grid.set(key, cell);
-        }
-        welded = weldGeometry(welded, 10000);
-        pos = welded.attributes.position;
-    }
-
-    // Pass 3: Hole Filling - detect and triangulate open loops
-    if (enabled) {
-        bEdges = findBoundaries(pos);
-        if (bEdges.length > 3) {
-            const adj = new Map<string, string[]>();
-            bEdges.forEach(e => {
-                const h1 = getVKey(e.a[0], e.a[1], e.a[2]), h2 = getVKey(e.b[0], e.b[1], e.b[2]);
-                const a1 = adj.get(h1) || []; a1.push(h2); adj.set(h1, a1);
-                const a2 = adj.get(h2) || []; a2.push(h1); adj.set(h2, a2);
-            });
-
-            const loops: string[][] = [];
-            const visited = new Set<string>();
-            const hToV = new Map<string, number[]>();
-            bEdges.forEach(e => {
-                hToV.set(getVKey(e.a[0], e.a[1], e.a[2]), e.a);
-                hToV.set(getVKey(e.b[0], e.b[1], e.b[2]), e.b);
-            });
-
-            adj.forEach((neighbors, startNode) => {
-                if (visited.has(startNode) || neighbors.length !== 2) return;
-                const loop = [startNode];
-                visited.add(startNode);
-                let curr = neighbors[0];
-                while (curr && curr !== startNode && !visited.has(curr)) {
-                    visited.add(curr);
-                    loop.push(curr);
-                    const nexts = adj.get(curr) || [];
-                    curr = nexts.find(n => !visited.has(n)) || (nexts.length === 2 && nexts.includes(startNode) ? startNode : "");
-                }
-                if (loop.length >= 3) loops.push(loop);
-            });
-
-            if (loops.length > 0) {
-                const extraTris: number[] = [];
-                loops.forEach(loop => {
-                    const points = loop.map(h => hToV.get(h)!);
-                    const center = [0, 0, 0];
-                    points.forEach(p => { center[0] += p[0]; center[1] += p[1]; center[2] += p[2]; });
-                    center[0] /= points.length; center[1] /= points.length; center[2] /= points.length;
-
-                    // Only fill small holes (e.g., radius < 2mm)
-                    let maxDistSq = 0;
-                    for (const p of points) {
-                        const dSq = (p[0] - center[0]) ** 2 + (p[1] - center[1]) ** 2 + (p[2] - center[2]) ** 2;
-                        if (dSq > maxDistSq) maxDistSq = dSq;
-                    }
-
-                    if (maxDistSq < threshold * threshold) { // Configurable threshold
-                        for (let i = 0; i < points.length; i++) {
-                            const p1 = points[i], p2 = points[(i + 1) % points.length];
-                            extraTris.push(p1[0], p1[1], p1[2], p2[0], p2[1], p2[2], center[0], center[1], center[2]);
-                        }
-                    }
-                });
-                if (extraTris.length > 0) {
-                    const oldPos = welded.attributes.position.array as Float32Array;
-                    const combined = new Float32Array(oldPos.length + extraTris.length);
-                    combined.set(oldPos); combined.set(extraTris, oldPos.length);
-                    welded = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(combined, 3));
-                }
-            }
+    const segments: { a: THREE.Vector3, b: THREE.Vector3, lenSq: number, ab: THREE.Vector3 }[] = [];
+    for (const data of edgeMap.values()) {
+        if (data.count === 1) {
+            const ab = new THREE.Vector3().subVectors(data.b, data.a);
+            segments.push({ a: data.a, b: data.b, lenSq: ab.lengthSq(), ab });
         }
     }
+    return segments;
+}
 
-    return weldGeometry(welded, 10000);
+function isOnAnySegment(p: THREE.Vector3, segments: { a: THREE.Vector3, b: THREE.Vector3, lenSq: number, ab: THREE.Vector3 }[], eps: number = 1e-2): boolean {
+    const epsSq = eps * eps;
+    for (const seg of segments) {
+        if (seg.lenSq < 1e-12) {
+            if (p.distanceToSquared(seg.a) < epsSq) return true;
+            continue;
+        }
+        const ap = new THREE.Vector3().subVectors(p, seg.a);
+        const t = ap.dot(seg.ab) / seg.lenSq;
+        if (t >= -1e-2 && t <= 1 + 1e-2) {
+            const proj = seg.a.clone().addScaledVector(seg.ab, t);
+            if (p.distanceToSquared(proj) < epsSq) return true;
+        }
+    }
+    return false;
 }
 
 // --------------------------------------------------------------------------------
@@ -256,7 +194,6 @@ function createProjectionData(geometry: THREE.BufferGeometry, faceIndices: numbe
         if (isPlanar) return upDir.clone();
         const ang = u / avgR;
         const radial = rightDir.clone().multiplyScalar(Math.cos(ang)).add(fwdDir.clone().multiplyScalar(Math.sin(ang)));
-        // True Normal for a cone (r = m*v + b) is (1, -m) in (radial, up) space
         const m = fit.m || 0;
         const norm = radial.clone().addScaledVector(upDir, -m).normalize();
         return norm.multiplyScalar(depthSign);
@@ -269,17 +206,22 @@ function createProjectionData(geometry: THREE.BufferGeometry, faceIndices: numbe
 // KNURLING IMPLEMENTATION
 // --------------------------------------------------------------------------------
 
-export function applyKnurling(
+export async function applyKnurling(
     geometry: THREE.BufferGeometry,
     faceIndices: number[],
     params: KnurlingParams
-): THREE.BufferGeometry {
+): Promise<THREE.BufferGeometry> {
     const proj = createProjectionData(geometry, faceIndices, params.angle);
     if (!proj) return geometry;
 
     const posAttr = geometry.attributes.position;
     const islands = getContiguousIslands(geometry, faceIndices);
     const newPos: number[] = [];
+
+    // Pre-compute boundary segments for wall generation
+    const boundarySegments = getBoundarySegments(geometry, faceIndices);
+    console.log(`[Knurling] Found ${boundarySegments.length} boundary segments.`);
+    let wallCount = 0;
 
     islands.forEach(islandIndices => {
         const islandPos = new Float32Array(islandIndices.length * 9);
@@ -314,8 +256,8 @@ export function applyKnurling(
             return out;
         };
 
-        for (let t = 0; t < subCount; t++) {
-            const off = t * 9;
+        for (let t_idx = 0; t_idx < subCount; t_idx++) {
+            const off = t_idx * 9;
             const pA_vec = new THREE.Vector3(subPos[off], subPos[off + 1], subPos[off + 2]);
             const pB_vec = new THREE.Vector3(subPos[off + 3], subPos[off + 4], subPos[off + 5]);
             const pC_vec = new THREE.Vector3(subPos[off + 6], subPos[off + 7], subPos[off + 8]);
@@ -357,12 +299,20 @@ export function applyKnurling(
                             for (let v = 1; v < poly.length - 1; v++) {
                                 const pts = [poly[0], poly[v], poly[v + 1]];
                                 const tempTri: THREE.Vector3[] = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+                                const tempOrig: THREE.Vector3[] = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+                                const tempIsBound: boolean[] = [false, false, false];
+
                                 pts.forEach((p, pIdx) => {
                                     const w = getBarycentric(p, tri[0], tri[1], tri[2]);
                                     const pBase = new THREE.Vector3().addScaledVector(triVecs[0], w.wA).addScaledVector(triVecs[1], w.wB).addScaledVector(triVecs[2], w.wC);
                                     const p0_u = proj.fromRot(p.u, p.v);
                                     const norm = proj.getNormal(p0_u.u, p0_u.v);
                                     const vFinal = pBase.addScaledVector(norm, p.h);
+
+                                    // Store base vertex and boundary check
+                                    tempOrig[pIdx] = pBase;
+                                    tempIsBound[pIdx] = isOnAnySegment(pBase, boundarySegments);
+
                                     if (proj.depthSign < 0) {
                                         // Reverse order for internal surfaces
                                         if (pIdx === 0) tempTri[0] = vFinal;
@@ -370,10 +320,33 @@ export function applyKnurling(
                                         else tempTri[2] = vFinal;
                                     } else {
                                         newPos.push(vFinal.x, vFinal.y, vFinal.z);
+                                        tempTri[pIdx] = vFinal;
                                     }
                                 });
+
                                 if (proj.depthSign < 0) {
                                     newPos.push(tempTri[2].x, tempTri[2].y, tempTri[2].z, tempTri[1].x, tempTri[1].y, tempTri[1].z, tempTri[0].x, tempTri[0].y, tempTri[0].z);
+                                }
+
+                                // --- Wall Stitching ---
+                                // If any two vertices of the triangle are on the boundary, create a wall between them.
+                                for (let k = 0; k < 3; k++) {
+                                    const k2 = (k + 1) % 3;
+                                    if (tempIsBound[k] && tempIsBound[k2]) {
+                                        const p1 = tempOrig[k], p2 = tempOrig[k2];
+                                        const p1_d = tempTri[k], p2_d = tempTri[k2];
+
+                                        // Generate Double-Sided Quad (to ensure visibility regardless of normal)
+                                        // Side A (Standard)
+                                        newPos.push(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, p1_d.x, p1_d.y, p1_d.z);
+                                        newPos.push(p2.x, p2.y, p2.z, p2_d.x, p2_d.y, p2_d.z, p1_d.x, p1_d.y, p1_d.z);
+
+                                        // Side B (Inverted)
+                                        newPos.push(p1.x, p1.y, p1.z, p1_d.x, p1_d.y, p1_d.z, p2.x, p2.y, p2.z);
+                                        newPos.push(p2.x, p2.y, p2.z, p1_d.x, p1_d.y, p1_d.z, p2_d.x, p2_d.y, p2_d.z);
+
+                                        wallCount++;
+                                    }
                                 }
                             }
                         }
@@ -382,38 +355,36 @@ export function applyKnurling(
             }
         }
     });
+    console.log(`[Knurling] Generated ${wallCount} wall quads.`);
 
     const finalR: number[] = []; const sel = new Set(faceIndices);
     for (let f = 0; f < posAttr.count / 3; f++) { if (!sel.has(f)) { for (let v = 0; v < 3; v++) { const idx = f * 3 + v; finalR.push(posAttr.getX(idx), posAttr.getY(idx), posAttr.getZ(idx)); } } }
     const combined = new Float32Array(finalR.length + newPos.length); combined.set(finalR); combined.set(newPos, finalR.length);
     const finalGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(combined, 3));
-    const repaired = repairMesh(finalGeo, params.holeFillThreshold, params.holeFillEnabled); repaired.computeVertexNormals(); return repaired;
+    const repaired = params.holeFillEnabled ? await repairGeometry(finalGeo) : finalGeo;
+    repaired.computeVertexNormals();
+    return repaired;
 }
 
 // --------------------------------------------------------------------------------
 // HONEYCOMB IMPLEMENTATION
 // --------------------------------------------------------------------------------
 
-export function applyHoneycomb(
+export async function applyHoneycomb(
     geometry: THREE.BufferGeometry,
     faceIndices: number[],
     params: HoneycombParams
-): THREE.BufferGeometry {
+): Promise<THREE.BufferGeometry> {
     const proj = createProjectionData(geometry, faceIndices, params.angle);
     if (!proj) return geometry;
 
     let { cellSize: W, wallThickness: t, depth, direction, angle: userAngle } = params;
 
-    // 1. Technical Wrap Adjustment (Cylinders/Cones)
     if (!proj.isPlanar && proj.circPhys > 0) {
-        // Find nearest technical symmetry angle
         const ang = ((userAngle % 180) + 180) % 180;
         const symmetries = [0, 30, 60, 90, 120, 150, 180];
         const bestSym = symmetries.reduce((p, c) => Math.abs(c - ang) < Math.abs(p - ang) ? c : p);
-
-        // Period along the circumference depends on the orientation
         const periodFactor = (bestSym % 60 === 0) ? 1.0 : Math.sqrt(3);
-
         const nUnits = Math.round(proj.circPhys / (W * periodFactor));
         W = proj.circPhys / (Math.max(1, nUnits) * periodFactor);
     }
@@ -425,6 +396,11 @@ export function applyHoneycomb(
     const posAttr = geometry.attributes.position;
     const islands = getContiguousIslands(geometry, faceIndices);
     const newPos: number[] = [];
+
+    // Boundary segments for wall stitching
+    const boundarySegments = getBoundarySegments(geometry, faceIndices);
+    console.log(`[Honeycomb] Found ${boundarySegments.length} boundary segments.`);
+    let wallCount = 0;
 
     islands.forEach(islandIndices => {
         const islandPos = new Float32Array(islandIndices.length * 9);
@@ -516,22 +492,49 @@ export function applyHoneycomb(
                             for (let v = 1; v < poly.length - 1; v++) {
                                 const pts = [poly[0], poly[v], poly[v + 1]];
                                 const tempTri: THREE.Vector3[] = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+                                const tempOrig: THREE.Vector3[] = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+                                const tempIsBound: boolean[] = [false, false, false];
+
                                 pts.forEach((p, pIdx) => {
                                     const w = getBarycentric(p, tri[0], tri[1], tri[2]);
                                     const pBase = new THREE.Vector3().addScaledVector(triVecs[0], w.wA).addScaledVector(triVecs[1], w.wB).addScaledVector(triVecs[2], w.wC);
                                     const p0_u = proj.fromRot(p.u, p.v);
                                     const norm = proj.getNormal(p0_u.u, p0_u.v);
                                     const vFinal = pBase.addScaledVector(norm, (p as any).h || 0);
+
+                                    tempOrig[pIdx] = pBase;
+                                    tempIsBound[pIdx] = isOnAnySegment(pBase, boundarySegments);
+
                                     if (proj.depthSign < 0) {
                                         if (pIdx === 0) tempTri[0] = vFinal;
                                         else if (pIdx === 1) tempTri[1] = vFinal;
                                         else tempTri[2] = vFinal;
                                     } else {
                                         newPos.push(vFinal.x, vFinal.y, vFinal.z);
+                                        tempTri[pIdx] = vFinal;
                                     }
                                 });
+
                                 if (proj.depthSign < 0) {
                                     newPos.push(tempTri[2].x, tempTri[2].y, tempTri[2].z, tempTri[1].x, tempTri[1].y, tempTri[1].z, tempTri[0].x, tempTri[0].y, tempTri[0].z);
+                                }
+
+                                // --- Wall Stitching ---
+                                for (let k = 0; k < 3; k++) {
+                                    const k2 = (k + 1) % 3;
+                                    if (tempIsBound[k] && tempIsBound[k2]) {
+                                        const p1 = tempOrig[k], p2 = tempOrig[k2];
+                                        const p1_d = tempTri[k], p2_d = tempTri[k2];
+
+                                        // Generate Double-Sided Quad
+                                        // Side A
+                                        newPos.push(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, p1_d.x, p1_d.y, p1_d.z);
+                                        newPos.push(p2.x, p2.y, p2.z, p2_d.x, p2_d.y, p2_d.z, p1_d.x, p1_d.y, p1_d.z);
+                                        // Side B
+                                        newPos.push(p1.x, p1.y, p1.z, p1_d.x, p1_d.y, p1_d.z, p2.x, p2.y, p2.z);
+                                        newPos.push(p2.x, p2.y, p2.z, p1_d.x, p1_d.y, p1_d.z, p2_d.x, p2_d.y, p2_d.z);
+                                        wallCount++;
+                                    }
                                 }
                             }
                         }
@@ -545,25 +548,28 @@ export function applyHoneycomb(
     for (let f = 0; f < posAttr.count / 3; f++) { if (!sel.has(f)) { for (let v = 0; v < 3; v++) { const idx = f * 3 + v; finalR.push(posAttr.getX(idx), posAttr.getY(idx), posAttr.getZ(idx)); } } }
     const combined = new Float32Array(finalR.length + newPos.length); combined.set(finalR); combined.set(newPos, finalR.length);
     const finalGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(combined, 3));
-    const repaired = repairMesh(finalGeo, params.holeFillThreshold, params.holeFillEnabled); repaired.computeVertexNormals(); return repaired;
+    const repaired = params.holeFillEnabled ? await repairGeometry(finalGeo) : finalGeo;
+    repaired.computeVertexNormals();
+    return repaired;
 }
 
 // --------------------------------------------------------------------------------
 // FUZZY SKIN IMPLEMENTATION
 // --------------------------------------------------------------------------------
 
-export function applyFuzzySkin(
+export async function applyFuzzySkin(
     geometry: THREE.BufferGeometry,
     faceIndices: number[],
     params: FuzzySkinParams
-): THREE.BufferGeometry {
+): Promise<THREE.BufferGeometry> {
     const islands = getContiguousIslands(geometry, faceIndices);
     const posAttr = geometry.attributes.position;
     const newPos: number[] = [];
 
-    const distSq = (x1: number, y1: number, z1: number, x2: number, y2: number, z2: number) => {
-        return (x1 - x2) ** 2 + (y1 - y2) ** 2 + (z1 - z2) ** 2;
-    };
+    // For fuzzy skin, we will just CLAMP the noise to 0 near the border.
+    // Walls are messy for noise meshes.
+    const boundarySegments = getBoundarySegments(geometry, faceIndices);
+    const clampDistSq = (params.pointDistance * 1.5) ** 2;
 
     islands.forEach(islandIndices => {
         const islandPos = new Float32Array(islandIndices.length * 9);
@@ -586,7 +592,7 @@ export function applyFuzzySkin(
                 const o = i * 9;
                 const d12 = distSq(currentSubPos[o], currentSubPos[o + 1], currentSubPos[o + 2], currentSubPos[o + 3], currentSubPos[o + 4], currentSubPos[o + 5]);
                 const d23 = distSq(currentSubPos[o + 3], currentSubPos[o + 4], currentSubPos[o + 5], currentSubPos[o + 6], currentSubPos[o + 7], currentSubPos[o + 8]);
-                const d31 = distSq(currentSubPos[o + 6], currentSubPos[o + 7], currentSubPos[o + 8], currentSubPos[o + 0], currentSubPos[o + 1], currentSubPos[o + 2]);
+                const d31 = distSq(currentSubPos[o + 6], currentSubPos[o + 7], currentSubPos[o + 8], currentSubPos[o], currentSubPos[o + 1], currentSubPos[o + 2]);
                 if (Math.max(d12, d23, d31) > targetSq) {
                     needsMore = true;
                     break;
@@ -605,9 +611,18 @@ export function applyFuzzySkin(
         const positions = subGeo.attributes.position.array as any as Float32Array;
         const normals = subGeo.attributes.normal.array as any as Float32Array;
 
-        // 3. Application of Noise (Random Displacement)
+        // 3. Application of Noise (Random Displacement) with Boundary Clamp
         for (let i = 0; i < positions.length / 3; i++) {
-            const noise = (Math.random() - 0.5) * 2 * params.thickness;
+            let noise = (Math.random() - 0.5) * 2 * params.thickness;
+            const px = positions[i * 3], py = positions[i * 3 + 1], pz = positions[i * 3 + 2];
+            const p = new THREE.Vector3(px, py, pz);
+
+            // Check boundary distance
+            // If near boundary, set noise to 0 to prevent tearing
+            if (isOnAnySegment(p, boundarySegments, Math.sqrt(clampDistSq))) {
+                noise = 0;
+            }
+
             positions[i * 3] += normals[i * 3] * noise;
             positions[i * 3 + 1] += normals[i * 3 + 1] * noise;
             positions[i * 3 + 2] += normals[i * 3 + 2] * noise;
@@ -624,7 +639,9 @@ export function applyFuzzySkin(
     for (let f = 0; f < posAttr.count / 3; f++) { if (!sel.has(f)) { for (let v = 0; v < 3; v++) { const idx = f * 3 + v; finalR.push(posAttr.getX(idx), posAttr.getY(idx), posAttr.getZ(idx)); } } }
     const combined = new Float32Array(finalR.length + newPos.length); combined.set(finalR); combined.set(newPos, finalR.length);
     const finalGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(combined, 3));
-    const repaired = repairMesh(finalGeo, params.holeFillThreshold, params.holeFillEnabled); repaired.computeVertexNormals(); return repaired;
+    const repaired = params.holeFillEnabled ? await repairGeometry(finalGeo) : finalGeo;
+    repaired.computeVertexNormals();
+    return repaired;
 }
 
 export function applyDecimate(geo: THREE.BufferGeometry, _faceIndices: number[], _params: any) { return geo; }

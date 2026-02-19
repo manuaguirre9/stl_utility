@@ -203,6 +203,13 @@ export const Toolbar: React.FC = () => {
                 )}
             </div>
 
+            <ToolButton
+                active={transformMode === 'stitching'}
+                icon={Waves}
+                title="Stitching Repair"
+                onClick={() => setTransformMode('stitching')}
+            />
+
             {!isMobile && <div style={{ height: '10px', marginTop: 'auto' }} />}
 
             <ToolButton

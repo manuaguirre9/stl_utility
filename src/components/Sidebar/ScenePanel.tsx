@@ -73,6 +73,35 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const isHistoryReEdit = selectedHistoryIds.length === 1 && selectedHistoryIds[0] !== 'initial' && reEditParams !== null;
     const selectedModel = models.find((m) => m.id === selectedId);
 
+    // Stitching State
+    const [stitchStats, setStitchStats] = useState<{ openEdges: number, nonManifoldEdges: number } | null>(null);
+    const [isRepairing, setIsRepairing] = useState(false);
+
+    // Auto-analyze when entering stitching mode
+    React.useEffect(() => {
+        if (transformMode === 'stitching' && selectedModel) {
+            import('../../utils/meshUtils').then(({ analyzeMesh }) => {
+                const stats = analyzeMesh(selectedModel.bufferGeometry);
+                setStitchStats(stats);
+            });
+        } else {
+            setStitchStats(null);
+        }
+    }, [transformMode, selectedModel?.meshVersion, selectedId]);
+
+    const handleStitchRepair = async () => {
+        if (!selectedId) return;
+        setIsRepairing(true);
+        try {
+            await useStore.getState().applyStitchRepair(selectedId);
+            // No need to manually re-analyze here.
+            // The useEffect on [transformMode, selectedModel?.meshVersion, selectedId]
+            // will automatically re-trigger because applyStitchRepair increments meshVersion.
+        } finally {
+            setIsRepairing(false);
+        }
+    };
+
     const selection = selectedId ? smartSelection[selectedId] || [] : [];
 
     const cylinderFit = React.useMemo(() => {
@@ -156,14 +185,16 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
         event.target.value = '';
     };
 
+    const showStitchingPanel = transformMode === 'stitching' && selectedId;
+
     return (
         <div style={{
             width: 'var(--sidebar-width)',
+            height: '100%',
             backgroundColor: 'var(--bg-panel)',
             borderLeft: '1px solid var(--border-color)',
             display: 'flex',
             flexDirection: 'column',
-            height: '100%',
             overflowY: 'auto'
         }}>
             {/* Scene Hierarchy */}
@@ -255,594 +286,481 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                 </div>
             </div>
 
-            {/* Properties Panel */}
+            {/* Properties Panel (SHARED) */}
             {selectedModel && (
                 <div style={{ padding: 'var(--spacing-md)' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                        <h3 style={{ fontSize: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
-                            {isHistoryReEdit ? 'Operation Re-edit' : 'Properties'}
-                        </h3>
-                        {isHistoryReEdit && (
-                            <span style={{ fontSize: '10px', color: '#ff6b00', fontWeight: 'bold', textTransform: 'uppercase' }}>Past Action</span>
-                        )}
-                    </div>
-
-                    {!isHistoryReEdit && (
-                        <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end', marginBottom: '16px' }}>
-                            <div style={{ flex: 1 }}>
-                                <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>Name</label>
-                                <input
-                                    type="text"
-                                    value={selectedModel.name}
-                                    onChange={(e) => updateModel(selectedModel.id, { name: e.target.value })}
-                                    style={{
-                                        width: '100%',
-                                        backgroundColor: 'var(--bg-input)',
-                                        border: '1px solid var(--border-color)',
-                                        color: 'var(--text-primary)',
-                                        padding: '6px 8px',
-                                        borderRadius: 'var(--radius-sm)',
-                                        fontSize: '13px',
-                                        height: '32px'
-                                    }}
-                                />
-                            </div>
-                            <div style={{ width: '40px' }}>
-                                <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>Color</label>
-                                <div style={{ position: 'relative', width: '32px', height: '32px' }}>
-                                    <input
-                                        type="color"
-                                        value={selectedModel.color}
-                                        onChange={(e) => updateModel(selectedModel.id, { color: e.target.value })}
-                                        style={{
-                                            position: 'absolute',
-                                            top: 0,
-                                            left: 0,
-                                            width: '100%',
-                                            height: '100%',
-                                            padding: '0',
-                                            border: '1px solid var(--border-color)',
-                                            borderRadius: 'var(--radius-sm)',
-                                            cursor: 'pointer',
-                                            opacity: 0
-                                        }}
-                                    />
-                                    <div style={{
-                                        width: '100%',
-                                        height: '100%',
-                                        backgroundColor: selectedModel.color,
-                                        border: '1px solid var(--border-color)',
-                                        borderRadius: 'var(--radius-sm)',
-                                        pointerEvents: 'none'
-                                    }} />
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Subdivide Tool Section */}
-                    {showSubdividePanel && (
-                        <div style={{
-                            marginTop: '24px',
-                            padding: '16px',
-                            backgroundColor: isHistoryReEdit ? 'rgba(255, 107, 0, 0.1)' : 'rgba(255, 107, 0, 0.05)',
-                            borderRadius: 'var(--radius-md)',
-                            border: isHistoryReEdit ? '1px solid #ff6b00' : '1px solid rgba(255, 107, 0, 0.2)'
-                        }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
-                                <div style={{ color: isHistoryReEdit ? '#ff6b00' : 'var(--accent-primary)' }}>
-                                    <Scissors size={18} />
-                                </div>
-                                <h3 style={{ fontSize: '14px', fontWeight: '600', color: 'var(--text-primary)' }}>
-                                    {isHistoryReEdit ? 'Re-calculate Subdivision' : 'Subdivide Tool'}
-                                </h3>
+                    {/* Stitching Panel Header & Content */}
+                    {showStitchingPanel ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                                <h3 style={{ fontSize: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Stitching Repair</h3>
                             </div>
 
-                            <div style={{ marginBottom: '16px' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                    <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Steps</label>
-                                    <span style={{ fontSize: '12px', color: isHistoryReEdit ? '#ff6b00' : 'var(--accent-primary)', fontWeight: '500' }}>{subdivideSteps}</span>
-                                </div>
-                                <input
-                                    type="range"
-                                    min="1"
-                                    max="3"
-                                    step="1"
-                                    value={subdivideSteps}
-                                    onChange={(e) => setSubdivideSteps(parseInt(e.target.value))}
-                                    style={{ width: '100%', accentColor: isHistoryReEdit ? '#ff6b00' : 'var(--accent-primary)' }}
-                                />
+                            <div style={{ padding: '12px', backgroundColor: 'var(--bg-panel-light)', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                                <h3 style={{ marginTop: 0, fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '12px' }}>Mesh Analysis</h3>
+                                {stitchStats ? (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                            <span style={{ color: 'var(--text-secondary)' }}>Open Edges (Holes):</span>
+                                            <span style={{ fontWeight: 'bold', color: stitchStats.openEdges > 0 ? 'var(--accent-error)' : 'var(--accent-success)' }}>
+                                                {stitchStats.openEdges}
+                                            </span>
+                                        </div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                            <span style={{ color: 'var(--text-secondary)' }}>Non-Manifold Edges:</span>
+                                            <span style={{ fontWeight: 'bold', color: stitchStats.nonManifoldEdges > 0 ? 'var(--accent-warning)' : 'var(--accent-success)' }}>
+                                                {stitchStats.nonManifoldEdges}
+                                            </span>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <span style={{ color: 'var(--text-secondary)', fontStyle: 'italic' }}>Analyzing...</span>
+                                )}
                             </div>
 
                             <button
-                                onClick={handleApply}
+                                onClick={handleStitchRepair}
+                                disabled={!stitchStats || isRepairing}
                                 style={{
-                                    width: '100%',
-                                    padding: '10px',
-                                    backgroundColor: isHistoryReEdit ? '#ff6b00' : 'var(--accent-primary)',
+                                    padding: '12px',
+                                    backgroundColor: 'var(--accent-primary)',
                                     color: 'white',
-                                    borderRadius: 'var(--radius-sm)',
+                                    border: 'none',
+                                    borderRadius: '8px',
+                                    fontWeight: 600,
+                                    cursor: 'pointer',
+                                    opacity: (!stitchStats || isRepairing) ? 0.5 : 1,
                                     display: 'flex',
                                     alignItems: 'center',
                                     justifyContent: 'center',
-                                    gap: '8px',
-                                    fontSize: '13px',
-                                    border: 'none',
-                                    cursor: 'pointer',
-                                    fontWeight: 'bold'
+                                    gap: '8px'
                                 }}
                             >
-                                {isHistoryReEdit ? <RotateCcw size={14} /> : <Scissors size={14} />}
-                                {isHistoryReEdit ? 'Recalculate & Reprocess' : 'Apply Subdivision'}
+                                {isRepairing ? (
+                                    <>
+                                        <RotateCcw className="spin" size={16} /> Repairing...
+                                    </>
+                                ) : (
+                                    <>
+                                        <Box size={16} /> Repair & Stitch Mesh
+                                    </>
+                                )}
                             </button>
+
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                <p style={{ fontSize: '11px', color: 'var(--text-secondary)', lineHeight: '1.4', margin: 0 }}>
+                                    • <strong>Stitching:</strong> Merges nearby vertices (0.01mm).
+                                </p>
+                                <p style={{ fontSize: '11px', color: 'var(--text-secondary)', lineHeight: '1.4', margin: 0 }}>
+                                    • <strong>Repair:</strong> Fills holes and fixes non-manifold edges.
+                                </p>
+                                <p style={{ fontSize: '10px', color: 'var(--text-muted)', lineHeight: '1.4', marginTop: '4px', fontStyle: 'italic' }}>
+                                    Modeled after professional 3D printer slicers. May alter mesh topology.
+                                </p>
+                            </div>
                         </div>
-                    )}
-
-                    {/* Texturize Tool Section */}
-                    {showTexturizePanel && (
-                        <div style={{
-                            marginTop: '24px',
-                            padding: '16px',
-                            backgroundColor: isHistoryReEdit ? 'rgba(0, 210, 255, 0.1)' : 'rgba(0, 210, 255, 0.05)',
-                            borderRadius: 'var(--radius-md)',
-                            border: isHistoryReEdit ? '1px solid #00d2ff' : '1px solid rgba(0, 210, 255, 0.2)'
-                        }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
-                                <div style={{ color: isHistoryReEdit ? '#00d2ff' : 'var(--accent-primary)' }}>
-                                    <Grid3X3 size={18} />
-                                </div>
-                                <h3 style={{ fontSize: '14px', fontWeight: '600', color: 'var(--text-primary)' }}>
-                                    {isHistoryReEdit ? 'Update Texture' : 'Texturize Tool'}
+                    ) : (
+                        /* Standard Properties Panel Content */
+                        <>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                                <h3 style={{ fontSize: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
+                                    {isHistoryReEdit ? 'Operation Re-edit' : 'Properties'}
                                 </h3>
+                                {isHistoryReEdit && (
+                                    <span style={{ fontSize: '10px', color: '#ff6b00', fontWeight: 'bold', textTransform: 'uppercase' }}>Past Action</span>
+                                )}
                             </div>
 
-                            <div style={{ marginBottom: '16px' }}>
-                                <div style={{
-                                    fontSize: '11px',
-                                    color: 'white',
-                                    textTransform: 'uppercase',
-                                    letterSpacing: '0.05em',
-                                    backgroundColor: 'var(--accent-primary)',
-                                    padding: '4px 8px',
-                                    borderRadius: '4px',
-                                    display: 'inline-block',
-                                    fontWeight: 'bold'
-                                }}>
-                                    Active: {textureType === 'decimate' ? 'Simplify' : textureType}
-                                </div>
-                            </div>
-
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                                {textureType === 'knurling' && (
-                                    <>
-                                        {/* 1. Knurl Pattern */}
-                                        <div>
-                                            <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>1. Knurl Pattern</label>
-                                            <div style={{ display: 'flex', gap: '4px' }}>
-                                                {(['diamond', 'straight', 'diagonal', 'square'] as const).map((p) => (
-                                                    <button
-                                                        key={p}
-                                                        onClick={() => {
-                                                            setKnurlPattern(p);
-                                                            if (p === 'straight' && angle !== 0 && angle !== 90) setAngle(0);
-                                                            if (p !== 'straight' && (angle === 90)) setAngle(45);
-                                                        }}
-                                                        style={{
-                                                            flex: 1,
-                                                            padding: '8px 4px',
-                                                            fontSize: '10px',
-                                                            borderRadius: '4px',
-                                                            backgroundColor: knurlPattern === p ? 'var(--accent-primary)' : 'var(--bg-input)',
-                                                            color: 'white',
-                                                            border: '1px solid var(--border-color)',
-                                                            cursor: 'pointer',
-                                                            textTransform: 'capitalize',
-                                                            transition: 'all 0.2s'
-                                                        }}
-                                                    >
-                                                        {p}
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        </div>
-
-                                        {/* 2. Knurling Angle */}
-                                        <div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>2. Knurling Angle</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{angle}°</span>
-                                            </div>
-                                            <div style={{ display: 'flex', gap: '4px' }}>
-                                                {(knurlPattern === 'straight' ? [0, 90] : [0, 30, 45]).map((a) => (
-                                                    <button
-                                                        key={a}
-                                                        onClick={() => setAngle(a)}
-                                                        style={{
-                                                            flex: 1,
-                                                            padding: '8px',
-                                                            fontSize: '11px',
-                                                            borderRadius: '4px',
-                                                            backgroundColor: angle === a ? (isHistoryReEdit ? '#00d2ff' : 'var(--accent-primary)') : 'var(--bg-input)',
-                                                            color: 'white',
-                                                            border: '1px solid var(--border-color)',
-                                                            cursor: 'pointer',
-                                                            transition: 'all 0.2s'
-                                                        }}
-                                                    >
-                                                        {a === 0 && knurlPattern === 'straight' ? 'Vertical' : (a === 90 ? 'Horizontal' : `${a}°`)}
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        </div>
-
-                                        {/* 3. Pitch */}
-                                        <div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>3. Pitch (mm)</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{pitch.toFixed(2)}</span>
-                                            </div>
+                            {!isHistoryReEdit && (
+                                <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end', marginBottom: '16px' }}>
+                                    <div style={{ flex: 1 }}>
+                                        <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>Name</label>
+                                        <input
+                                            type="text"
+                                            value={selectedModel.name}
+                                            onChange={(e) => updateModel(selectedModel.id, { name: e.target.value })}
+                                            style={{
+                                                width: '100%',
+                                                backgroundColor: 'var(--bg-input)',
+                                                border: '1px solid var(--border-color)',
+                                                color: 'var(--text-primary)',
+                                                padding: '6px 8px',
+                                                borderRadius: 'var(--radius-sm)',
+                                                fontSize: '13px',
+                                                height: '32px'
+                                            }}
+                                        />
+                                    </div>
+                                    <div style={{ width: '40px' }}>
+                                        <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>Color</label>
+                                        <div style={{ position: 'relative', width: '32px', height: '32px' }}>
                                             <input
-                                                type="range"
-                                                min="0.1"
-                                                max="10"
-                                                step="0.0001"
-                                                value={pitch}
-                                                onChange={(e) => {
-                                                    const val = parseFloat(e.target.value);
-                                                    setPitch(val);
-                                                    setReferencePitch(val);
-                                                }}
-                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
-                                            />
-                                            {cylinderFit && (
-                                                <div style={{ marginTop: '8px', padding: '10px', backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: '6px', border: '1px solid rgba(0,210,255,0.3)' }}>
-                                                    <div style={{ fontSize: '11px', color: '#00d2ff', fontWeight: 'bold', marginBottom: '6px', letterSpacing: '0.05em' }}>PERFECT PITCH</div>
-                                                    <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginBottom: '8px', opacity: 0.8 }}>CYLINDER DETECTED (C: {circumference.toFixed(1)}mm)</div>
-                                                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                                                        {(() => {
-                                                            const isEvenPattern = knurlPattern === 'diamond' || knurlPattern === 'square';
-                                                            // Use referencePitch for stability
-                                                            const n_nom = Math.round(circumference / referencePitch);
-
-                                                            // For diamond/square, we strictly need EVEN subdivisions to close the pattern
-                                                            // For straight/diagonal, any integer works
-                                                            let n_base = n_nom;
-                                                            if (isEvenPattern && n_base % 2 !== 0) n_base += 1;
-
-                                                            const candidates = new Set<number>();
-                                                            candidates.add(n_base);
-                                                            candidates.add(n_base + (isEvenPattern ? 2 : 1));
-                                                            candidates.add(n_base - (isEvenPattern ? 2 : 1));
-
-                                                            const sorted = Array.from(candidates).filter(n => n >= 2).sort((a, b) => a - b);
-
-                                                            return sorted.map(n => {
-                                                                const sugP = circumference / n;
-                                                                // Check if current pitch is closely matching this suggestion
-                                                                const isSelected = Math.abs(pitch - sugP) < 0.001;
-
-                                                                return (
-                                                                    <button
-                                                                        key={n}
-                                                                        onClick={() => setPitch(sugP)}
-                                                                        style={{
-                                                                            padding: '4px 8px',
-                                                                            fontSize: '10px',
-                                                                            backgroundColor: isSelected ? 'var(--accent-primary)' : 'rgba(0, 210, 255, 0.2)',
-                                                                            color: isSelected ? 'white' : '#00d2ff',
-                                                                            border: isSelected ? '1px solid var(--accent-primary)' : '1px solid rgba(0, 210, 255, 0.4)',
-                                                                            borderRadius: '4px',
-                                                                            cursor: 'pointer',
-                                                                            fontWeight: '500',
-                                                                            transition: 'all 0.2s'
-                                                                        }}
-                                                                        onMouseEnter={(e) => !isSelected && (e.currentTarget.style.backgroundColor = 'rgba(0, 210, 255, 0.3)')}
-                                                                        onMouseLeave={(e) => !isSelected && (e.currentTarget.style.backgroundColor = 'rgba(0, 210, 255, 0.2)')}
-                                                                    >
-                                                                        N={n} → {sugP.toFixed(2)}mm
-                                                                    </button>
-                                                                );
-                                                            });
-                                                        })()}
-                                                    </div>
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        {/* 4. Depth */}
-                                        <div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>4. Depth (mm)</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{depth.toFixed(2)}</span>
-                                            </div>
-                                            <input
-                                                type="range"
-                                                min="0.1"
-                                                max="5"
-                                                step="0.1"
-                                                value={depth}
-                                                onChange={(e) => setDepth(parseFloat(e.target.value))}
-                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
-                                            />
-                                        </div>
-                                    </>
-                                )}
-
-                                {textureType === 'honeycomb' && (
-                                    <>
-                                        {/* 1. Pattern Angle */}
-                                        <div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>1. Pattern Angle</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{angle}°</span>
-                                            </div>
-                                            <div style={{ display: 'flex', gap: '4px' }}>
-                                                {[0, 30, 45, 90].map((a) => (
-                                                    <button
-                                                        key={a}
-                                                        onClick={() => setAngle(a)}
-                                                        style={{
-                                                            flex: 1,
-                                                            padding: '8px',
-                                                            fontSize: '11px',
-                                                            borderRadius: '4px',
-                                                            backgroundColor: angle === a ? 'var(--accent-primary)' : 'var(--bg-input)',
-                                                            color: 'white',
-                                                            border: '1px solid var(--border-color)',
-                                                            cursor: 'pointer'
-                                                        }}
-                                                    >
-                                                        {a}°
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        </div>
-
-                                        {/* 2. Cell Size */}
-                                        <div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>2. Cell Size (mm)</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{cellSize.toFixed(2)}</span>
-                                            </div>
-                                            <input
-                                                type="range"
-                                                min="1"
-                                                max="20"
-                                                step="0.1"
-                                                value={cellSize}
-                                                onChange={(e) => {
-                                                    const val = parseFloat(e.target.value);
-                                                    setCellSize(val);
-                                                    setReferenceCellSize(val);
-                                                }}
-                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
-                                            />
-                                            {cylinderFit && (
-                                                <div style={{ marginTop: '8px', padding: '10px', backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: '6px', border: '1px solid rgba(0,210,255,0.3)' }}>
-                                                    <div style={{ fontSize: '11px', color: '#00d2ff', fontWeight: 'bold', marginBottom: '6px', letterSpacing: '0.05em' }}>PERFECT CELL SIZE</div>
-                                                    <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginBottom: '8px', opacity: 0.8 }}>CYLINDER DETECTED (C: {circumference.toFixed(1)}mm)</div>
-                                                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                                                        {[0, 1].map(isAlt => {
-                                                            const ang = ((angle % 180) + 180) % 180;
-                                                            const sym = [0, 30, 60, 90, 120, 150, 180].reduce((p, c) => Math.abs(c - ang) < Math.abs(p - ang) ? c : p);
-                                                            const factor = (sym % 60 === 0) ? 1.0 : Math.sqrt(3);
-                                                            // Use referenceCellSize for stability
-                                                            const n = Math.round(circumference / (referenceCellSize * factor)) + (isAlt ? 1 : 0);
-                                                            const sugW = circumference / (Math.max(1, n) * factor);
-
-                                                            if (sugW < 1 || sugW > 25) return null;
-
-                                                            // Check if current cellSize is closely matching this suggestion
-                                                            const isSelected = Math.abs(cellSize - sugW) < 0.001;
-
-                                                            return (
-                                                                <button
-                                                                    key={isAlt}
-                                                                    onClick={() => setCellSize(sugW)}
-                                                                    style={{
-                                                                        padding: '4px 8px',
-                                                                        fontSize: '10px',
-                                                                        backgroundColor: isSelected ? 'var(--accent-primary)' : 'rgba(0, 210, 255, 0.2)',
-                                                                        color: isSelected ? 'white' : '#00d2ff',
-                                                                        border: isSelected ? '1px solid var(--accent-primary)' : '1px solid rgba(0, 210, 255, 0.4)',
-                                                                        borderRadius: '4px',
-                                                                        cursor: 'pointer',
-                                                                        fontWeight: '500',
-                                                                        transition: 'all 0.2s'
-                                                                    }}
-                                                                    onMouseEnter={(e) => !isSelected && (e.currentTarget.style.backgroundColor = 'rgba(0, 210, 255, 0.3)')}
-                                                                    onMouseLeave={(e) => !isSelected && (e.currentTarget.style.backgroundColor = 'rgba(0, 210, 255, 0.2)')}
-                                                                >
-                                                                    N={n} → {sugW.toFixed(2)}mm
-                                                                </button>
-                                                            );
-                                                        })}
-                                                    </div>
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        {/* 3. Wall Thickness */}
-                                        <div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>3. Wall Thickness (mm)</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{wallThickness.toFixed(2)}</span>
-                                            </div>
-                                            <input
-                                                type="range"
-                                                min="0.05"
-                                                max="2.0"
-                                                step="0.05"
-                                                value={wallThickness}
-                                                onChange={(e) => setWallThickness(parseFloat(e.target.value))}
-                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
-                                            />
-                                        </div>
-
-                                        {/* 4. Depth */}
-                                        <div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>4. Depth (mm)</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{depth.toFixed(2)}</span>
-                                            </div>
-                                            <input
-                                                type="range"
-                                                min="0.1"
-                                                max="5"
-                                                step="0.1"
-                                                value={depth}
-                                                onChange={(e) => setDepth(parseFloat(e.target.value))}
-                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
-                                            />
-                                        </div>
-
-                                        {/* 5. Direction */}
-                                        <div>
-                                            <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>5. Direction</label>
-                                            <div style={{ display: 'flex', gap: '4px' }}>
-                                                {(['inward', 'outward'] as const).map((d) => (
-                                                    <button
-                                                        key={d}
-                                                        onClick={() => setDirection(d)}
-                                                        style={{
-                                                            flex: 1,
-                                                            padding: '8px',
-                                                            fontSize: '11px',
-                                                            borderRadius: '4px',
-                                                            backgroundColor: direction === d ? 'var(--accent-primary)' : 'var(--bg-input)',
-                                                            color: 'white',
-                                                            border: '1px solid var(--border-color)',
-                                                            cursor: 'pointer',
-                                                            textTransform: 'capitalize'
-                                                        }}
-                                                    >
-                                                        {d}
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    </>
-                                )}
-
-                                {textureType === 'fuzzy' && (
-                                    <>
-                                        {/* 1. Thickness */}
-                                        <div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>1. Noise Thickness (mm)</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{fuzzyThickness.toFixed(2)}</span>
-                                            </div>
-                                            <input
-                                                type="range"
-                                                min="0.2"
-                                                max="5.0"
-                                                step="0.05"
-                                                value={fuzzyThickness}
-                                                onChange={(e) => setFuzzyThickness(parseFloat(e.target.value))}
-                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
-                                            />
-                                        </div>
-
-                                        {/* 2. Point Distance (Density) */}
-                                        <div>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>2. Noise Density (mm dist)</label>
-                                                <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{pointDistance.toFixed(2)}</span>
-                                            </div>
-                                            <input
-                                                type="range"
-                                                min="0.2"
-                                                max="5.0"
-                                                step="0.05"
-                                                value={pointDistance}
-                                                onChange={(e) => setPointDistance(parseFloat(e.target.value))}
-                                                style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
-                                            />
-                                            <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px', fontStyle: 'italic' }}>Lower values = Higher resolution noise</div>
-                                        </div>
-                                    </>
-                                )}
-
-                                {(textureType === 'knurling' || textureType === 'honeycomb' || textureType === 'fuzzy') && (
-                                    <div style={{ padding: '12px', backgroundColor: 'rgba(255, 107, 0, 0.05)', borderRadius: '4px', border: '1px dashed rgba(255, 107, 0, 0.2)' }}>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                                            <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Anti-Tearing Repair</label>
-                                            <button
-                                                onClick={() => setHoleFillEnabled(!holeFillEnabled)}
+                                                type="color"
+                                                value={selectedModel.color}
+                                                onChange={(e) => updateModel(selectedModel.id, { color: e.target.value })}
                                                 style={{
-                                                    padding: '4px 8px',
-                                                    fontSize: '10px',
-                                                    backgroundColor: holeFillEnabled ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
-                                                    color: 'white',
-                                                    border: 'none',
-                                                    borderRadius: '4px',
-                                                    cursor: 'pointer'
+                                                    position: 'absolute', top: 0, left: 0,
+                                                    width: '100%', height: '100%', padding: '0',
+                                                    border: '1px solid var(--border-color)',
+                                                    borderRadius: 'var(--radius-sm)',
+                                                    cursor: 'pointer', opacity: 0
                                                 }}
-                                            >
-                                                {holeFillEnabled ? 'ON' : 'OFF'}
-                                            </button>
+                                            />
+                                            <div style={{
+                                                width: '100%', height: '100%',
+                                                backgroundColor: selectedModel.color,
+                                                border: '1px solid var(--border-color)',
+                                                borderRadius: 'var(--radius-sm)',
+                                                pointerEvents: 'none'
+                                            }} />
                                         </div>
-                                        {holeFillEnabled && (
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Subdivide Tool Section */}
+                            {showSubdividePanel && (
+                                <div style={{
+                                    marginTop: '24px', padding: '16px',
+                                    backgroundColor: isHistoryReEdit ? 'rgba(255, 107, 0, 0.1)' : 'rgba(255, 107, 0, 0.05)',
+                                    borderRadius: 'var(--radius-md)',
+                                    border: isHistoryReEdit ? '1px solid #ff6b00' : '1px solid rgba(255, 107, 0, 0.2)'
+                                }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
+                                        <Scissors size={18} style={{ color: isHistoryReEdit ? '#ff6b00' : 'var(--accent-primary)' }} />
+                                        <h3 style={{ fontSize: '14px', fontWeight: '600', color: 'var(--text-primary)' }}>
+                                            {isHistoryReEdit ? 'Re-calculate Subdivision' : 'Subdivide Tool'}
+                                        </h3>
+                                    </div>
+                                    <div style={{ marginBottom: '16px' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                            <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Steps</label>
+                                            <span style={{ fontSize: '12px', color: isHistoryReEdit ? '#ff6b00' : 'var(--accent-primary)', fontWeight: '500' }}>{subdivideSteps}</span>
+                                        </div>
+                                        <input type="range" min="1" max="3" step="1" value={subdivideSteps}
+                                            onChange={(e) => setSubdivideSteps(parseInt(e.target.value))}
+                                            style={{ width: '100%', accentColor: isHistoryReEdit ? '#ff6b00' : 'var(--accent-primary)' }}
+                                        />
+                                    </div>
+                                    <button onClick={handleApply} style={{
+                                        width: '100%', padding: '10px',
+                                        backgroundColor: isHistoryReEdit ? '#ff6b00' : 'var(--accent-primary)',
+                                        color: 'white', borderRadius: 'var(--radius-sm)',
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                        gap: '8px', fontSize: '13px', border: 'none', cursor: 'pointer', fontWeight: 'bold'
+                                    }}>
+                                        {isHistoryReEdit ? <RotateCcw size={14} /> : <Scissors size={14} />}
+                                        {isHistoryReEdit ? 'Recalculate & Reprocess' : 'Apply Subdivision'}
+                                    </button>
+                                </div>
+                            )}
+
+                            {/* Texturize Tool Section */}
+                            {showTexturizePanel && (
+                                <div style={{
+                                    marginTop: '24px', padding: '16px',
+                                    backgroundColor: isHistoryReEdit ? 'rgba(0, 210, 255, 0.1)' : 'rgba(0, 210, 255, 0.05)',
+                                    borderRadius: 'var(--radius-md)',
+                                    border: isHistoryReEdit ? '1px solid #00d2ff' : '1px solid rgba(0, 210, 255, 0.2)'
+                                }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
+                                        <Grid3X3 size={18} style={{ color: isHistoryReEdit ? '#00d2ff' : 'var(--accent-primary)' }} />
+                                        <h3 style={{ fontSize: '14px', fontWeight: '600', color: 'var(--text-primary)' }}>
+                                            {isHistoryReEdit ? 'Update Texture' : 'Texturize Tool'}
+                                        </h3>
+                                    </div>
+
+                                    <div style={{ marginBottom: '16px' }}>
+                                        <div style={{
+                                            fontSize: '11px', color: 'white', textTransform: 'uppercase',
+                                            letterSpacing: '0.05em', backgroundColor: 'var(--accent-primary)',
+                                            padding: '4px 8px', borderRadius: '4px', display: 'inline-block', fontWeight: 'bold'
+                                        }}>
+                                            Active: {textureType === 'decimate' ? 'Simplify' : textureType}
+                                        </div>
+                                    </div>
+
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                                        {textureType === 'knurling' && (
                                             <>
-                                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                    <label style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Threshold</label>
-                                                    <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{holeFillThreshold.toFixed(1)} mm</span>
+                                                <div>
+                                                    <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>1. Knurl Pattern</label>
+                                                    <div style={{ display: 'flex', gap: '4px' }}>
+                                                        {(['diamond', 'straight', 'diagonal', 'square'] as const).map((p) => (
+                                                            <button key={p} onClick={() => {
+                                                                setKnurlPattern(p);
+                                                                if (p === 'straight' && angle !== 0 && angle !== 90) setAngle(0);
+                                                                if (p !== 'straight' && angle === 90) setAngle(45);
+                                                            }} style={{
+                                                                flex: 1, padding: '8px 4px', fontSize: '10px', borderRadius: '4px',
+                                                                backgroundColor: knurlPattern === p ? 'var(--accent-primary)' : 'var(--bg-input)',
+                                                                color: 'white', border: '1px solid var(--border-color)',
+                                                                cursor: 'pointer', textTransform: 'capitalize', transition: 'all 0.2s'
+                                                            }}>
+                                                                {p}
+                                                            </button>
+                                                        ))}
+                                                    </div>
                                                 </div>
-                                                <input
-                                                    type="range"
-                                                    min="0.1"
-                                                    max="5.0"
-                                                    step="0.1"
-                                                    value={holeFillThreshold}
-                                                    onChange={(e) => setHoleFillThreshold(parseFloat(e.target.value))}
-                                                    style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
-                                                />
-                                                <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px', fontStyle: 'italic' }}>
-                                                    Fills gaps smaller than this value on selection borders.
+
+                                                <div>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                        <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>2. Knurling Angle</label>
+                                                        <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{angle}°</span>
+                                                    </div>
+                                                    <div style={{ display: 'flex', gap: '4px' }}>
+                                                        {(knurlPattern === 'straight' ? [0, 90] : [0, 30, 45]).map((a) => (
+                                                            <button key={a} onClick={() => setAngle(a)} style={{
+                                                                flex: 1, padding: '8px', fontSize: '11px', borderRadius: '4px',
+                                                                backgroundColor: angle === a ? (isHistoryReEdit ? '#00d2ff' : 'var(--accent-primary)') : 'var(--bg-input)',
+                                                                color: 'white', border: '1px solid var(--border-color)',
+                                                                cursor: 'pointer', transition: 'all 0.2s'
+                                                            }}>
+                                                                {a === 0 && knurlPattern === 'straight' ? 'Vertical' : (a === 90 ? 'Horizontal' : `${a}°`)}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+
+                                                <div>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                        <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>3. Pitch (mm)</label>
+                                                        <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{pitch.toFixed(2)}</span>
+                                                    </div>
+                                                    <input type="range" min="0.1" max="10" step="0.0001" value={pitch}
+                                                        onChange={(e) => { const val = parseFloat(e.target.value); setPitch(val); setReferencePitch(val); }}
+                                                        style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                                    />
+                                                    {cylinderFit && (
+                                                        <div style={{ marginTop: '8px', padding: '10px', backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: '6px', border: '1px solid rgba(0,210,255,0.3)' }}>
+                                                            <div style={{ fontSize: '11px', color: '#00d2ff', fontWeight: 'bold', marginBottom: '6px', letterSpacing: '0.05em' }}>PERFECT PITCH</div>
+                                                            <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginBottom: '8px', opacity: 0.8 }}>CYLINDER DETECTED (C: {circumference.toFixed(1)}mm)</div>
+                                                            <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                                                                {(() => {
+                                                                    const isEvenPattern = knurlPattern === 'diamond' || knurlPattern === 'square';
+                                                                    const n_nom = Math.round(circumference / referencePitch);
+                                                                    let n_base = n_nom;
+                                                                    if (isEvenPattern && n_base % 2 !== 0) n_base += 1;
+                                                                    const candidates = new Set<number>();
+                                                                    candidates.add(n_base);
+                                                                    candidates.add(n_base + (isEvenPattern ? 2 : 1));
+                                                                    candidates.add(n_base - (isEvenPattern ? 2 : 1));
+                                                                    const sorted = Array.from(candidates).filter(n => n >= 2).sort((a, b) => a - b);
+                                                                    return sorted.map(n => {
+                                                                        const sugP = circumference / n;
+                                                                        const isSelected = Math.abs(pitch - sugP) < 0.001;
+                                                                        return (
+                                                                            <button key={n} onClick={() => setPitch(sugP)} style={{
+                                                                                padding: '4px 8px', fontSize: '10px',
+                                                                                backgroundColor: isSelected ? 'var(--accent-primary)' : 'rgba(0, 210, 255, 0.2)',
+                                                                                color: isSelected ? 'white' : '#00d2ff',
+                                                                                border: isSelected ? '1px solid var(--accent-primary)' : '1px solid rgba(0, 210, 255, 0.4)',
+                                                                                borderRadius: '4px', cursor: 'pointer', fontWeight: '500', transition: 'all 0.2s'
+                                                                            }}>
+                                                                                N={n} → {sugP.toFixed(2)}mm
+                                                                            </button>
+                                                                        );
+                                                                    });
+                                                                })()}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                <div>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                        <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>4. Depth (mm)</label>
+                                                        <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{depth.toFixed(2)}</span>
+                                                    </div>
+                                                    <input type="range" min="0.1" max="5" step="0.1" value={depth}
+                                                        onChange={(e) => setDepth(parseFloat(e.target.value))}
+                                                        style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                                    />
                                                 </div>
                                             </>
                                         )}
-                                    </div>
-                                )}
 
-                                {textureType === 'decimate' && (
-                                    <div>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                            <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Reduction Ratio</label>
-                                            <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '500' }}>{(reductionRatio * 100).toFixed(0)}%</span>
-                                        </div>
-                                        <input
-                                            type="range"
-                                            min="0.01"
-                                            max="0.99"
-                                            step="0.01"
-                                            value={reductionRatio}
-                                            onChange={(e) => setReductionRatio(parseFloat(e.target.value))}
-                                            style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
-                                        />
-                                    </div>
-                                )}
+                                        {textureType === 'honeycomb' && (
+                                            <>
+                                                <div>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                        <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>1. Pattern Angle</label>
+                                                        <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{angle}°</span>
+                                                    </div>
+                                                    <div style={{ display: 'flex', gap: '4px' }}>
+                                                        {[0, 30, 45, 90].map((a) => (
+                                                            <button key={a} onClick={() => setAngle(a)} style={{
+                                                                flex: 1, padding: '8px', fontSize: '11px', borderRadius: '4px',
+                                                                backgroundColor: angle === a ? 'var(--accent-primary)' : 'var(--bg-input)',
+                                                                color: 'white', border: '1px solid var(--border-color)', cursor: 'pointer'
+                                                            }}>
+                                                                {a}°
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
 
-                                <button
-                                    onClick={handleApply}
-                                    style={{
-                                        width: '100%',
-                                        padding: '12px',
-                                        backgroundColor: isHistoryReEdit ? '#00d2ff' : 'var(--accent-primary)',
-                                        color: 'white',
-                                        border: 'none',
-                                        borderRadius: 'var(--radius-sm)',
-                                        cursor: 'pointer',
-                                        fontWeight: 'bold',
-                                        fontSize: '13px',
-                                        marginTop: '16px'
-                                    }}
-                                >
-                                    {isHistoryReEdit ? <RotateCcw size={14} style={{ marginRight: '8px' }} /> : null}
-                                    {isHistoryReEdit ? 'Recalculate & Redo' : 'Apply Texture'}
-                                </button>
-                            </div>
-                        </div>
+                                                <div>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                        <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>2. Cell Size (mm)</label>
+                                                        <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{cellSize.toFixed(2)}</span>
+                                                    </div>
+                                                    <input type="range" min="1" max="20" step="0.1" value={cellSize}
+                                                        onChange={(e) => { const val = parseFloat(e.target.value); setCellSize(val); setReferenceCellSize(val); }}
+                                                        style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                                    />
+                                                    {cylinderFit && (
+                                                        <div style={{ marginTop: '8px', padding: '10px', backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: '6px', border: '1px solid rgba(0,210,255,0.3)' }}>
+                                                            <div style={{ fontSize: '11px', color: '#00d2ff', fontWeight: 'bold', marginBottom: '6px', letterSpacing: '0.05em' }}>PERFECT CELL SIZE</div>
+                                                            <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginBottom: '8px', opacity: 0.8 }}>CYLINDER DETECTED (C: {circumference.toFixed(1)}mm)</div>
+                                                            <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                                                                {[0, 1].map(isAlt => {
+                                                                    const ang = ((angle % 180) + 180) % 180;
+                                                                    const sym = [0, 30, 60, 90, 120, 150, 180].reduce((p, c) => Math.abs(c - ang) < Math.abs(p - ang) ? c : p);
+                                                                    const factor = (sym % 60 === 0) ? 1.0 : Math.sqrt(3);
+                                                                    const n = Math.round(circumference / (referenceCellSize * factor)) + (isAlt ? 1 : 0);
+                                                                    const sugW = circumference / (Math.max(1, n) * factor);
+                                                                    if (sugW < 1 || sugW > 25) return null;
+                                                                    const isSelected = Math.abs(cellSize - sugW) < 0.001;
+                                                                    return (
+                                                                        <button key={isAlt} onClick={() => setCellSize(sugW)} style={{
+                                                                            padding: '4px 8px', fontSize: '10px',
+                                                                            backgroundColor: isSelected ? 'var(--accent-primary)' : 'rgba(0, 210, 255, 0.2)',
+                                                                            color: isSelected ? 'white' : '#00d2ff',
+                                                                            border: isSelected ? '1px solid var(--accent-primary)' : '1px solid rgba(0, 210, 255, 0.4)',
+                                                                            borderRadius: '4px', cursor: 'pointer', fontWeight: '500', transition: 'all 0.2s'
+                                                                        }}>
+                                                                            N={n} → {sugW.toFixed(2)}mm
+                                                                        </button>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                <div>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                        <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>3. Wall Thickness (mm)</label>
+                                                        <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{wallThickness.toFixed(2)}</span>
+                                                    </div>
+                                                    <input type="range" min="0.05" max="2.0" step="0.05" value={wallThickness}
+                                                        onChange={(e) => setWallThickness(parseFloat(e.target.value))}
+                                                        style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                                    />
+                                                </div>
+
+                                                <div>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                        <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>4. Depth (mm)</label>
+                                                        <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{depth.toFixed(2)}</span>
+                                                    </div>
+                                                    <input type="range" min="0.1" max="5" step="0.1" value={depth}
+                                                        onChange={(e) => setDepth(parseFloat(e.target.value))}
+                                                        style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                                    />
+                                                </div>
+
+                                                <div>
+                                                    <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>5. Direction</label>
+                                                    <div style={{ display: 'flex', gap: '4px' }}>
+                                                        {(['inward', 'outward'] as const).map((d) => (
+                                                            <button key={d} onClick={() => setDirection(d)} style={{
+                                                                flex: 1, padding: '8px', fontSize: '11px', borderRadius: '4px',
+                                                                backgroundColor: direction === d ? 'var(--accent-primary)' : 'var(--bg-input)',
+                                                                color: 'white', border: '1px solid var(--border-color)',
+                                                                cursor: 'pointer', textTransform: 'capitalize'
+                                                            }}>
+                                                                {d}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </>
+                                        )}
+
+                                        {textureType === 'fuzzy' && (
+                                            <>
+                                                <div>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                        <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>1. Noise Thickness (mm)</label>
+                                                        <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{fuzzyThickness.toFixed(2)}</span>
+                                                    </div>
+                                                    <input type="range" min="0.2" max="5.0" step="0.05" value={fuzzyThickness}
+                                                        onChange={(e) => setFuzzyThickness(parseFloat(e.target.value))}
+                                                        style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                                    />
+                                                </div>
+                                                <div>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                        <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>2. Noise Density (mm dist)</label>
+                                                        <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{pointDistance.toFixed(2)}</span>
+                                                    </div>
+                                                    <input type="range" min="0.2" max="5.0" step="0.05" value={pointDistance}
+                                                        onChange={(e) => setPointDistance(parseFloat(e.target.value))}
+                                                        style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                                    />
+                                                    <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px', fontStyle: 'italic' }}>Lower values = Higher resolution noise</div>
+                                                </div>
+                                            </>
+                                        )}
+
+                                        {(textureType === 'knurling' || textureType === 'honeycomb' || textureType === 'fuzzy') && (
+                                            <div style={{ padding: '12px', backgroundColor: 'rgba(255, 107, 0, 0.05)', borderRadius: '4px', border: '1px dashed rgba(255, 107, 0, 0.2)' }}>
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                                                    <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Anti-Tearing Repair</label>
+                                                    <button onClick={() => setHoleFillEnabled(!holeFillEnabled)} style={{
+                                                        padding: '4px 8px', fontSize: '10px',
+                                                        backgroundColor: holeFillEnabled ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
+                                                        color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer'
+                                                    }}>
+                                                        {holeFillEnabled ? 'ON' : 'OFF'}
+                                                    </button>
+                                                </div>
+                                                {holeFillEnabled && (
+                                                    <>
+                                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                            <label style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Threshold</label>
+                                                            <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{holeFillThreshold.toFixed(1)} mm</span>
+                                                        </div>
+                                                        <input type="range" min="0.1" max="5.0" step="0.1" value={holeFillThreshold}
+                                                            onChange={(e) => setHoleFillThreshold(parseFloat(e.target.value))}
+                                                            style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                                        />
+                                                        <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px', fontStyle: 'italic' }}>
+                                                            Fills gaps smaller than this value on selection borders.
+                                                        </div>
+                                                    </>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {textureType === 'decimate' && (
+                                            <div>
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                    <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Reduction Ratio</label>
+                                                    <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '500' }}>{(reductionRatio * 100).toFixed(0)}%</span>
+                                                </div>
+                                                <input type="range" min="0.01" max="0.99" step="0.01" value={reductionRatio}
+                                                    onChange={(e) => setReductionRatio(parseFloat(e.target.value))}
+                                                    style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
+                                                />
+                                            </div>
+                                        )}
+
+                                        <button onClick={handleApply} style={{
+                                            width: '100%', padding: '12px',
+                                            backgroundColor: isHistoryReEdit ? '#00d2ff' : 'var(--accent-primary)',
+                                            color: 'white', border: 'none', borderRadius: 'var(--radius-sm)',
+                                            cursor: 'pointer', fontWeight: 'bold', fontSize: '13px', marginTop: '16px'
+                                        }}>
+                                            {isHistoryReEdit ? <RotateCcw size={14} style={{ marginRight: '8px' }} /> : null}
+                                            {isHistoryReEdit ? 'Recalculate & Redo' : 'Apply Texture'}
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                        </>
                     )}
                 </div>
             )}
