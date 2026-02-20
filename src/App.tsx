@@ -4,6 +4,7 @@ import { Toolbar } from './components/Sidebar/Toolbar';
 import { ScenePanel } from './components/Sidebar/ScenePanel';
 import { SceneView } from './components/Viewport/SceneView';
 import { HistoryTimeline } from './components/Timeline/HistoryTimeline';
+import { ProcessingOverlay } from './components/Layout/ProcessingOverlay';
 import { useStore } from './store/useStore';
 import { useIsMobile } from './utils/useIsMobile';
 import { Analytics } from '@vercel/analytics/react';
@@ -106,6 +107,7 @@ const App: React.FC = () => {
           <HistoryTimeline />
         </div>
       </div>
+      <ProcessingOverlay />
     </div>
   );
 };

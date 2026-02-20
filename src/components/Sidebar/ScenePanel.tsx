@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { useStore } from '../../store/useStore';
 import type { KnurlPattern } from '../../utils/texturizeUtils';
-import { Eye, EyeOff, Box, Trash2, Scissors, Grid3X3, X, RotateCcw } from 'lucide-react';
+import { Eye, EyeOff, Box, Trash2, Scissors, Grid3X3, X, RotateCcw, Zap } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { fitCylinderToSelection } from '../../utils/meshUtils';
@@ -27,6 +27,8 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const recalculateHistoryItem = useStore((state) => state.recalculateHistoryItem);
     const textureType = useStore((state) => state.textureType);
     const setTextureType = useStore((state) => state.setTextureType);
+    const isProcessing = useStore((state) => state.isProcessing);
+    const applyManifoldRepair = useStore((state) => state.applyManifoldRepair);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [subdivideSteps, setSubdivideSteps] = useState(1);
@@ -42,10 +44,12 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const [knurlPattern, setKnurlPattern] = useState<KnurlPattern>('diamond');
     const [reductionRatio, setReductionRatio] = useState(0.5);
     const [direction, setDirection] = useState<'inward' | 'outward'>('inward');
-    const [holeFillThreshold, setHoleFillThreshold] = useState(1.0);
+    const [holeFillThreshold, setHoleFillThreshold] = useState(0.5);
     const [holeFillEnabled, setHoleFillEnabled] = useState(true);
     const [fuzzyThickness, setFuzzyThickness] = useState(0.2);
     const [pointDistance, setPointDistance] = useState(0.2);
+    const [repairEdgeMult, setRepairEdgeMult] = useState(3);
+    const [repairHoleMult, setRepairHoleMult] = useState(10);
 
     // Sync with re-edit params
     React.useEffect(() => {
@@ -74,8 +78,10 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const selectedModel = models.find((m) => m.id === selectedId);
 
     // Stitching State
-    const [stitchStats, setStitchStats] = useState<{ openEdges: number, nonManifoldEdges: number } | null>(null);
+    const [stitchStats, setStitchStats] = useState<{ openEdges: number, nonManifoldEdges: number, avgEdgeLength: number, boundaryEdgePositions: Float32Array } | null>(null);
+    const [analyzedHoles, setAnalyzedHoles] = useState<any[] | null>(null);
     const [isRepairing, setIsRepairing] = useState(false);
+    const setBoundaryEdges = useStore((state) => state.setBoundaryEdges);
 
     // Auto-analyze when entering stitching mode
     React.useEffect(() => {
@@ -83,11 +89,46 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
             import('../../utils/meshUtils').then(({ analyzeMesh }) => {
                 const stats = analyzeMesh(selectedModel.bufferGeometry);
                 setStitchStats(stats);
+                setBoundaryEdges(selectedModel.id, stats.boundaryEdgePositions);
+            });
+            import('../../utils/manifoldRepairService').then(({ analyzeRepairableHoles }) => {
+                const results = analyzeRepairableHoles(selectedModel.bufferGeometry);
+                setAnalyzedHoles(results.holes);
             });
         } else {
             setStitchStats(null);
+            setAnalyzedHoles(null);
+            if (selectedId) {
+                setBoundaryEdges(selectedId, null);
+                useStore.getState().setFillPreviewEdges(selectedId, null, null);
+            }
         }
     }, [transformMode, selectedModel?.meshVersion, selectedId]);
+
+    // Live update hole preview based on sliders
+    React.useEffect(() => {
+        if (!selectedId || !stitchStats || !analyzedHoles) return;
+        const avgEdge = stitchStats.avgEdgeLength;
+        const maxTriSize = avgEdge * repairEdgeMult;
+        const maxHoleDiameter = avgEdge * repairHoleMult;
+
+        const fillable: number[] = [];
+        const unfillable: number[] = [];
+
+        analyzedHoles.forEach(hole => {
+            if (hole.diameter <= maxHoleDiameter && hole.maxEdge <= maxTriSize) {
+                for (let i = 0; i < hole.positions.length; i++) fillable.push(hole.positions[i]);
+            } else {
+                for (let i = 0; i < hole.positions.length; i++) unfillable.push(hole.positions[i]);
+            }
+        });
+
+        useStore.getState().setFillPreviewEdges(
+            selectedId,
+            fillable.length > 0 ? new Float32Array(fillable) : null,
+            unfillable.length > 0 ? new Float32Array(unfillable) : null
+        );
+    }, [analyzedHoles, repairEdgeMult, repairHoleMult, stitchStats, selectedId]);
 
     const handleStitchRepair = async () => {
         if (!selectedId) return;
@@ -320,7 +361,7 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
 
                             <button
                                 onClick={handleStitchRepair}
-                                disabled={!stitchStats || isRepairing}
+                                disabled={!stitchStats || isRepairing || isProcessing}
                                 style={{
                                     padding: '12px',
                                     backgroundColor: 'var(--accent-primary)',
@@ -347,15 +388,84 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                 )}
                             </button>
 
+                            <button
+                                onClick={() => applyManifoldRepair(selectedModel.id, {
+                                    edgeMultiplier: repairEdgeMult,
+                                    holeDiameterMultiplier: repairHoleMult
+                                })}
+                                disabled={isProcessing}
+                                style={{
+                                    padding: '12px',
+                                    backgroundColor: 'rgba(0, 210, 255, 0.1)',
+                                    color: '#00d2ff',
+                                    border: '1px solid rgba(0, 210, 255, 0.4)',
+                                    borderRadius: '8px',
+                                    fontWeight: 600,
+                                    cursor: 'pointer',
+                                    opacity: isProcessing ? 0.5 : 1,
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    gap: '8px',
+                                    transition: 'all 0.2s'
+                                }}
+                            >
+                                <Zap size={16} /> Fill Gaps (Watertight Repair)
+                            </button>
+
+                            {/* Repair threshold sliders */}
+                            {stitchStats && (() => {
+                                const avg = stitchStats.avgEdgeLength;
+                                const fillEdgeMm = (repairEdgeMult * avg).toFixed(2);
+                                const fillEdgeIn = (repairEdgeMult * avg / 25.4).toFixed(3);
+                                const holeDiaMm = (repairHoleMult * avg).toFixed(2);
+                                const holeDiaIn = (repairHoleMult * avg / 25.4).toFixed(3);
+                                return (
+                                    <div style={{ padding: '12px', backgroundColor: 'var(--bg-panel-light)', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+                                        <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginBottom: '10px' }}>
+                                            Avg edge: <strong style={{ color: '#00d2ff' }}>{avg.toFixed(3)} mm</strong> ({(avg / 25.4).toFixed(4)} in)
+                                        </div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                            <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Max Fill Edge</label>
+                                            <span style={{ fontSize: '12px', color: '#00d2ff', fontWeight: '600' }}>{fillEdgeMm} mm / {fillEdgeIn} in</span>
+                                        </div>
+                                        <input type="range" min="1" max="50" step="1" value={repairEdgeMult}
+                                            onChange={(e) => setRepairEdgeMult(parseFloat(e.target.value))}
+                                            style={{ width: '100%', accentColor: '#00d2ff' }}
+                                        />
+                                        <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px', display: 'flex', justifyContent: 'space-between' }}>
+                                            <span>Max triangle edge for gap fill.</span>
+                                        </div>
+
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', marginTop: '12px' }}>
+                                            <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Max Hole Diameter</label>
+                                            <span style={{ fontSize: '12px', color: '#00d2ff', fontWeight: '600' }}>{holeDiaMm} mm / {holeDiaIn} in</span>
+                                        </div>
+                                        <input type="range" min="5" max="100" step="5" value={repairHoleMult}
+                                            onChange={(e) => setRepairHoleMult(parseFloat(e.target.value))}
+                                            style={{ width: '100%', accentColor: '#00d2ff' }}
+                                        />
+                                        <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px', display: 'flex', justifyContent: 'space-between' }}>
+                                            <span>Max hole diameter to fill.</span>
+                                            {analyzedHoles && (
+                                                <span style={{ color: '#00ff00', fontWeight: 'bold' }}>
+                                                    {analyzedHoles.filter(h => h.diameter <= repairHoleMult * avg && h.maxEdge <= repairEdgeMult * avg).length} / {analyzedHoles.length} holes
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                );
+                            })()}
+
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                                 <p style={{ fontSize: '11px', color: 'var(--text-secondary)', lineHeight: '1.4', margin: 0 }}>
-                                    • <strong>Stitching:</strong> Merges nearby vertices (0.01mm).
+                                    • <strong>Stitch & Repair:</strong> Legacy JS-based method for small cracks.
                                 </p>
                                 <p style={{ fontSize: '11px', color: 'var(--text-secondary)', lineHeight: '1.4', margin: 0 }}>
-                                    • <strong>Repair:</strong> Fills holes and fixes non-manifold edges.
+                                    • <strong>Fill Gaps:</strong> Conservative repair — fills small gaps with tiny triangles. Doesn't remove or modify existing geometry.
                                 </p>
                                 <p style={{ fontSize: '10px', color: 'var(--text-muted)', lineHeight: '1.4', marginTop: '4px', fontStyle: 'italic' }}>
-                                    Modeled after professional 3D printer slicers. May alter mesh topology.
+                                    Increase the sliders if holes aren't being filled. The repair will never modify existing faces.
                                 </p>
                             </div>
                         </div>
@@ -442,12 +552,15 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                             style={{ width: '100%', accentColor: isHistoryReEdit ? '#ff6b00' : 'var(--accent-primary)' }}
                                         />
                                     </div>
-                                    <button onClick={handleApply} style={{
+                                    <button onClick={handleApply} disabled={isProcessing} style={{
                                         width: '100%', padding: '10px',
                                         backgroundColor: isHistoryReEdit ? '#ff6b00' : 'var(--accent-primary)',
                                         color: 'white', borderRadius: 'var(--radius-sm)',
                                         display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                        gap: '8px', fontSize: '13px', border: 'none', cursor: 'pointer', fontWeight: 'bold'
+                                        gap: '8px', fontSize: '13px', border: 'none',
+                                        cursor: isProcessing ? 'not-allowed' : 'pointer',
+                                        fontWeight: 'bold',
+                                        opacity: isProcessing ? 0.6 : 1
                                     }}>
                                         {isHistoryReEdit ? <RotateCcw size={14} /> : <Scissors size={14} />}
                                         {isHistoryReEdit ? 'Recalculate & Reprocess' : 'Apply Subdivision'}
@@ -748,11 +861,13 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                             </div>
                                         )}
 
-                                        <button onClick={handleApply} style={{
+                                        <button onClick={handleApply} disabled={isProcessing} style={{
                                             width: '100%', padding: '12px',
                                             backgroundColor: isHistoryReEdit ? '#00d2ff' : 'var(--accent-primary)',
                                             color: 'white', border: 'none', borderRadius: 'var(--radius-sm)',
-                                            cursor: 'pointer', fontWeight: 'bold', fontSize: '13px', marginTop: '16px'
+                                            cursor: isProcessing ? 'not-allowed' : 'pointer',
+                                            fontWeight: 'bold', fontSize: '13px', marginTop: '16px',
+                                            opacity: isProcessing ? 0.6 : 1
                                         }}>
                                             {isHistoryReEdit ? <RotateCcw size={14} style={{ marginRight: '8px' }} /> : null}
                                             {isHistoryReEdit ? 'Recalculate & Redo' : 'Apply Texture'}

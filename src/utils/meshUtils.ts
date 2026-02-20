@@ -435,37 +435,75 @@ export function fitCylinderToSelection(
 
 /**
  * Analyzes the mesh for topological issues.
- * Returns the count of open edges (boundary) and non-manifold edges.
+ * Returns edge counts, average edge length, and boundary edge positions for visualization.
  */
-export function analyzeMesh(geometry: THREE.BufferGeometry): { openEdges: number, nonManifoldEdges: number } {
+export function analyzeMesh(geometry: THREE.BufferGeometry): {
+    openEdges: number;
+    nonManifoldEdges: number;
+    avgEdgeLength: number;
+    /** Flat Float32Array of line segment positions [x1,y1,z1, x2,y2,z2, ...] for boundary edge visualization */
+    boundaryEdgePositions: Float32Array;
+} {
     const posAttr = geometry.attributes.position;
     const prec = 10000;
     const vKey = (idx: number) =>
         `${Math.round(posAttr.getX(idx) * prec)},${Math.round(posAttr.getY(idx) * prec)},${Math.round(posAttr.getZ(idx) * prec)}`;
 
-    const edgeCounts = new Map<string, number>();
+    // Map: edge key → { count, positions of the two endpoints }
+    const edgeData = new Map<string, { count: number; ax: number; ay: number; az: number; bx: number; by: number; bz: number }>();
+
+    let totalEdgeLen = 0;
+    let edgeCount = 0;
 
     for (let fIdx = 0; fIdx < posAttr.count / 3; fIdx++) {
         const off = fIdx * 3;
         const k0 = vKey(off), k1 = vKey(off + 1), k2 = vKey(off + 2);
 
-        const processEdge = (keyA: string, keyB: string) => {
+        const processEdge = (keyA: string, keyB: string, idxA: number, idxB: number) => {
             const key = keyA < keyB ? `${keyA}:${keyB}` : `${keyB}:${keyA}`;
-            edgeCounts.set(key, (edgeCounts.get(key) || 0) + 1);
+            const existing = edgeData.get(key);
+            if (existing) {
+                existing.count++;
+            } else {
+                edgeData.set(key, {
+                    count: 1,
+                    ax: posAttr.getX(idxA), ay: posAttr.getY(idxA), az: posAttr.getZ(idxA),
+                    bx: posAttr.getX(idxB), by: posAttr.getY(idxB), bz: posAttr.getZ(idxB),
+                });
+            }
+
+            // Compute edge length for average
+            const dx = posAttr.getX(idxA) - posAttr.getX(idxB);
+            const dy = posAttr.getY(idxA) - posAttr.getY(idxB);
+            const dz = posAttr.getZ(idxA) - posAttr.getZ(idxB);
+            totalEdgeLen += Math.sqrt(dx * dx + dy * dy + dz * dz);
+            edgeCount++;
         };
 
-        processEdge(k0, k1);
-        processEdge(k1, k2);
-        processEdge(k2, k0);
+        processEdge(k0, k1, off, off + 1);
+        processEdge(k1, k2, off + 1, off + 2);
+        processEdge(k2, k0, off + 2, off);
     }
 
     let openEdges = 0;
     let nonManifoldEdges = 0;
+    const boundarySegments: number[] = [];
 
-    for (const count of edgeCounts.values()) {
-        if (count === 1) openEdges++;
-        if (count > 2) nonManifoldEdges++;
+    for (const data of edgeData.values()) {
+        if (data.count === 1) {
+            openEdges++;
+            // Add line segment for this boundary edge
+            boundarySegments.push(data.ax, data.ay, data.az, data.bx, data.by, data.bz);
+        }
+        if (data.count > 2) {
+            nonManifoldEdges++;
+            // Also highlight non-manifold edges
+            boundarySegments.push(data.ax, data.ay, data.az, data.bx, data.by, data.bz);
+        }
     }
 
-    return { openEdges, nonManifoldEdges };
+    const avgEdgeLength = edgeCount > 0 ? totalEdgeLen / edgeCount : 1;
+    const boundaryEdgePositions = new Float32Array(boundarySegments);
+
+    return { openEdges, nonManifoldEdges, avgEdgeLength, boundaryEdgePositions };
 }

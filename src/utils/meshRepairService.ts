@@ -2,19 +2,12 @@ import * as THREE from 'three';
 
 /**
  * Pure JavaScript mesh repair service.
- * Pipeline:
- * 1. Build indexed mesh (Exact deduplication)
- * 2. Remove degenerate faces
- * 3. Stitch: Snap nearby vertices (Tolerance-based)
- * 4. Remove unconnected facets (Cleanup orphans)
- * 5. Fill Holes: Close boundary loops (Advanced Ear Clipping)
- * 6. Fix normal directions & Volume sign
+ * Refined to avoid filling large functional holes while still fixing small tears.
  */
 
 interface IndexedMesh {
-    vertices: Float32Array;   // flat xyz
-    faces: number[];          // flat v0,v1,v2
-    numVertices: number;
+    vertices: number[];   // flat xyz
+    faces: number[];      // flat v0,v1,v2
 }
 
 function edgeKey(a: number, b: number): string {
@@ -45,9 +38,8 @@ function buildIndexedMesh(positions: ArrayLike<number>): IndexedMesh {
     }
 
     return {
-        vertices: new Float32Array(uniqueVerts),
-        faces: faceIndices,
-        numVertices: numUniqueVerts
+        vertices: uniqueVerts,
+        faces: faceIndices
     };
 }
 
@@ -85,8 +77,9 @@ function snapNearbyVertices(mesh: IndexedMesh, tolerance: number): number {
         cell.push(vi);
     }
 
-    const mergeMap = new Int32Array(mesh.numVertices);
-    for (let i = 0; i < mesh.numVertices; i++) mergeMap[i] = i;
+    const numUnique = verts.length / 3;
+    const mergeMap = new Int32Array(numUnique);
+    for (let i = 0; i < numUnique; i++) mergeMap[i] = i;
 
     function root(v: number): number {
         while (mergeMap[v] !== v) v = mergeMap[v];
@@ -126,7 +119,7 @@ function snapNearbyVertices(mesh: IndexedMesh, tolerance: number): number {
     return mergeCount;
 }
 
-function fillHoles(mesh: IndexedMesh, maxHoleEdges: number): number {
+function fillHoles(mesh: IndexedMesh, maxHoleEdges: number, maxInradius: number = Infinity): number {
     const numFaces = mesh.faces.length / 3;
     const edgeFaceCount = new Map<string, number>();
     for (let fi = 0; fi < numFaces; fi++) {
@@ -157,34 +150,53 @@ function fillHoles(mesh: IndexedMesh, maxHoleEdges: number): number {
         }
     }
 
-    const visited = new Set<string>();
+    const visitedEdges = new Set<string>();
     let filledCount = 0;
 
-    for (const startVal of adj.keys()) {
-        const neighbors = adj.get(startVal);
+    for (const startNode of adj.keys()) {
+        const neighbors = adj.get(startNode);
         if (!neighbors) continue;
-        for (const nextVal of neighbors) {
-            const loopKey = `${startVal}_${nextVal}`;
-            if (visited.has(loopKey)) continue;
+        for (const nextNode of neighbors) {
+            const edgeId = `${startNode}_${nextNode}`;
+            if (visitedEdges.has(edgeId)) continue;
 
-            const loop: number[] = [startVal];
-            let curr = nextVal;
-            visited.add(loopKey);
+            const loop: number[] = [startNode];
+            let curr = nextNode;
+            visitedEdges.add(edgeId);
             let stuck = false;
-            while (curr !== startVal) {
+            while (curr !== startNode) {
                 loop.push(curr);
                 if (loop.length > maxHoleEdges) { stuck = true; break; }
                 const nexts = adj.get(curr);
                 if (!nexts) { stuck = true; break; }
                 let foundNext = -1;
-                for (const n of nexts) { if (!visited.has(`${curr}_${n}`)) { foundNext = n; break; } }
+                for (const candidate of nexts) {
+                    if (!visitedEdges.has(`${curr}_${candidate}`)) { foundNext = candidate; break; }
+                }
                 if (foundNext === -1) { stuck = true; break; }
-                visited.add(`${curr}_${foundNext}`);
+                visitedEdges.add(`${curr}_${foundNext}`);
                 curr = foundNext;
             }
 
             if (!stuck && loop.length >= 3) {
-                triangulatePolygon(mesh, loop, mesh.vertices);
+                // HEURISTIC: Skip if this is a large functional opening (like a pipe end)
+                if (maxInradius !== Infinity) {
+                    let cx = 0, cy = 0, cz = 0;
+                    for (const vi of loop) { cx += mesh.vertices[vi * 3]; cy += mesh.vertices[vi * 3 + 1]; cz += mesh.vertices[vi * 3 + 2]; }
+                    cx /= loop.length; cy /= loop.length; cz /= loop.length;
+
+                    let minDistSq = Infinity;
+                    for (const vi of loop) {
+                        const d2 = (mesh.vertices[vi * 3] - cx) ** 2 + (mesh.vertices[vi * 3 + 1] - cy) ** 2 + (mesh.vertices[vi * 3 + 2] - cz) ** 2;
+                        if (d2 < minDistSq) minDistSq = d2;
+                    }
+                    // If the 'inradius' is much larger than our tolerance, it's a design hole, not a tear.
+                    if (Math.sqrt(minDistSq) > maxInradius * 1.5) {
+                        continue;
+                    }
+                }
+
+                triangulatePolygonRobust(mesh, loop);
                 filledCount++;
             }
         }
@@ -192,24 +204,58 @@ function fillHoles(mesh: IndexedMesh, maxHoleEdges: number): number {
     return filledCount;
 }
 
-function triangulatePolygon(mesh: IndexedMesh, loopIndices: number[], verts: Float32Array) {
-    const polygon = loopIndices.slice();
+function triangulatePolygonRobust(mesh: IndexedMesh, loopIndices: number[]) {
+    const polygon = [...loopIndices];
+    const verts = mesh.vertices;
     let safety = 0;
-    while (polygon.length > 3 && safety < 1000) {
+    while (polygon.length > 3 && safety < 2000) {
         safety++;
-        let bestIdx = -1, minScore = Infinity;
+        let bestEarIdx = -1;
+        let maxMinAngle = -Infinity;
         for (let i = 0; i < polygon.length; i++) {
-            const prev = polygon[(i - 1 + polygon.length) % polygon.length];
-            const next = polygon[(i + 1) % polygon.length];
-            const distSq = (verts[prev * 3] - verts[next * 3]) ** 2 + (verts[prev * 3 + 1] - verts[next * 3 + 1]) ** 2 + (verts[prev * 3 + 2] - verts[next * 3 + 2]) ** 2;
-            if (distSq < minScore) { minScore = distSq; bestIdx = i; }
+            const iPrev = (i - 1 + polygon.length) % polygon.length;
+            const iNext = (i + 1) % polygon.length;
+            const p = polygon[i], a = polygon[iPrev], b = polygon[iNext];
+            const va = new THREE.Vector3(verts[a * 3] - verts[p * 3], verts[a * 3 + 1] - verts[p * 3 + 1], verts[a * 3 + 2] - verts[p * 3 + 2]);
+            const vb = new THREE.Vector3(verts[b * 3] - verts[p * 3], verts[b * 3 + 1] - verts[p * 3 + 1], verts[b * 3 + 2] - verts[p * 3 + 2]);
+            const vab = new THREE.Vector3(verts[b * 3] - verts[a * 3], verts[b * 3 + 1] - verts[a * 3 + 1], verts[b * 3 + 2] - verts[a * 3 + 2]);
+            const la = va.length(), lb = vb.length(), lab = vab.length();
+            if (la < 1e-9 || lb < 1e-9 || lab < 1e-9) { bestEarIdx = i; break; }
+            const cosP = va.dot(vb) / (la * lb);
+            const minAngleCos = Math.max(cosP, va.clone().negate().dot(vab) / (la * lab), vb.clone().negate().dot(vab.clone().negate()) / (lb * lab));
+            let isEar = true;
+            for (let j = 0; j < polygon.length; j++) {
+                if (j === i || j === iPrev || j === iNext) continue;
+                if (isPointInTriangle(polygon[j], a, p, b, verts)) { isEar = false; break; }
+            }
+            if (isEar) {
+                const quality = -minAngleCos;
+                if (quality > maxMinAngle) { maxMinAngle = quality; bestEarIdx = i; }
+            }
         }
-        if (bestIdx !== -1) {
-            mesh.faces.push(polygon[(bestIdx - 1 + polygon.length) % polygon.length], polygon[bestIdx], polygon[(bestIdx + 1) % polygon.length]);
-            polygon.splice(bestIdx, 1);
-        } else break;
+        if (bestEarIdx !== -1) {
+            const iPrev = (bestEarIdx - 1 + polygon.length) % polygon.length;
+            const iNext = (bestEarIdx + 1) % polygon.length;
+            mesh.faces.push(polygon[iPrev], polygon[bestEarIdx], polygon[iNext]);
+            polygon.splice(bestEarIdx, 1);
+        } else {
+            mesh.faces.push(polygon[0], polygon[1], polygon[2]);
+            polygon.splice(1, 1);
+        }
     }
     if (polygon.length === 3) mesh.faces.push(polygon[0], polygon[1], polygon[2]);
+}
+
+function isPointInTriangle(pIdx: number, aIdx: number, bIdx: number, cIdx: number, verts: number[]): boolean {
+    const P = new THREE.Vector3(verts[pIdx * 3], verts[pIdx * 3 + 1], verts[pIdx * 3 + 2]);
+    const A = new THREE.Vector3(verts[aIdx * 3], verts[aIdx * 3 + 1], verts[aIdx * 3 + 2]);
+    const B = new THREE.Vector3(verts[bIdx * 3], verts[bIdx * 3 + 1], verts[bIdx * 3 + 2]);
+    const C = new THREE.Vector3(verts[cIdx * 3], verts[cIdx * 3 + 1], verts[cIdx * 3 + 2]);
+    const v0 = new THREE.Vector3().subVectors(C, A), v1 = new THREE.Vector3().subVectors(B, A), v2 = new THREE.Vector3().subVectors(P, A);
+    const dot00 = v0.dot(v0), dot01 = v0.dot(v1), dot02 = v0.dot(v2), dot11 = v1.dot(v1), dot12 = v1.dot(v2);
+    const invDenom = 1 / (dot00 * dot11 - dot01 * dot01);
+    const u = (dot11 * dot02 - dot01 * dot12) * invDenom, v = (dot00 * dot12 - dot01 * dot02) * invDenom;
+    return (u >= 0) && (v >= 0) && (u + v < 1);
 }
 
 function removeDegenerateFaces(mesh: IndexedMesh): IndexedMesh {
@@ -288,20 +334,28 @@ function fixVolumeSign(mesh: IndexedMesh): void {
     }
 }
 
-export async function repairGeometry(geometry: THREE.BufferGeometry): Promise<THREE.BufferGeometry> {
+export async function repairGeometry(
+    geometry: THREE.BufferGeometry,
+    maxTolerance?: number
+): Promise<THREE.BufferGeometry> {
     try {
         let mesh = buildIndexedMesh(geometry.attributes.position.array);
         const tolerances = [0.001, 0.01, 0.1, 0.5];
+        if (maxTolerance && maxTolerance > 0.5) tolerances.push(maxTolerance);
         for (const t of tolerances) if (snapNearbyVertices(mesh, t) > 0) removeDegenerateFaces(mesh);
         removeUnconnectedFacets(mesh);
-        fillHoles(mesh, 2000);
+
+        // Use threshold to intelligently skip large openings
+        fillHoles(mesh, 2000, maxTolerance || Infinity);
+
         fixNormalDirections(mesh);
         fixVolumeSign(mesh);
         const result = new THREE.BufferGeometry();
         const pos = new Float32Array(mesh.faces.length * 3);
+        const verts = mesh.vertices;
         for (let i = 0; i < mesh.faces.length; i++) {
             const vi = mesh.faces[i] * 3;
-            pos[i * 3] = mesh.vertices[vi]; pos[i * 3 + 1] = mesh.vertices[vi + 1]; pos[i * 3 + 2] = mesh.vertices[vi + 2];
+            pos[i * 3] = verts[vi]; pos[i * 3 + 1] = verts[vi + 1]; pos[i * 3 + 2] = verts[vi + 2];
         }
         result.setAttribute('position', new THREE.BufferAttribute(pos, 3));
         result.computeVertexNormals();

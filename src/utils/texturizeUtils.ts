@@ -361,7 +361,7 @@ export async function applyKnurling(
     for (let f = 0; f < posAttr.count / 3; f++) { if (!sel.has(f)) { for (let v = 0; v < 3; v++) { const idx = f * 3 + v; finalR.push(posAttr.getX(idx), posAttr.getY(idx), posAttr.getZ(idx)); } } }
     const combined = new Float32Array(finalR.length + newPos.length); combined.set(finalR); combined.set(newPos, finalR.length);
     const finalGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(combined, 3));
-    const repaired = params.holeFillEnabled ? await repairGeometry(finalGeo) : finalGeo;
+    const repaired = params.holeFillEnabled ? await repairGeometry(finalGeo, params.holeFillThreshold) : finalGeo;
     repaired.computeVertexNormals();
     return repaired;
 }
@@ -548,7 +548,7 @@ export async function applyHoneycomb(
     for (let f = 0; f < posAttr.count / 3; f++) { if (!sel.has(f)) { for (let v = 0; v < 3; v++) { const idx = f * 3 + v; finalR.push(posAttr.getX(idx), posAttr.getY(idx), posAttr.getZ(idx)); } } }
     const combined = new Float32Array(finalR.length + newPos.length); combined.set(finalR); combined.set(newPos, finalR.length);
     const finalGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(combined, 3));
-    const repaired = params.holeFillEnabled ? await repairGeometry(finalGeo) : finalGeo;
+    const repaired = params.holeFillEnabled ? await repairGeometry(finalGeo, params.holeFillThreshold) : finalGeo;
     repaired.computeVertexNormals();
     return repaired;
 }
@@ -569,7 +569,7 @@ export async function applyFuzzySkin(
     // For fuzzy skin, we will just CLAMP the noise to 0 near the border.
     // Walls are messy for noise meshes.
     const boundarySegments = getBoundarySegments(geometry, faceIndices);
-    const clampDistSq = (params.pointDistance * 1.5) ** 2;
+    const clampDist = params.holeFillThreshold;
 
     islands.forEach(islandIndices => {
         const islandPos = new Float32Array(islandIndices.length * 9);
@@ -619,7 +619,7 @@ export async function applyFuzzySkin(
 
             // Check boundary distance
             // If near boundary, set noise to 0 to prevent tearing
-            if (isOnAnySegment(p, boundarySegments, Math.sqrt(clampDistSq))) {
+            if (isOnAnySegment(p, boundarySegments, clampDist)) {
                 noise = 0;
             }
 
@@ -639,7 +639,7 @@ export async function applyFuzzySkin(
     for (let f = 0; f < posAttr.count / 3; f++) { if (!sel.has(f)) { for (let v = 0; v < 3; v++) { const idx = f * 3 + v; finalR.push(posAttr.getX(idx), posAttr.getY(idx), posAttr.getZ(idx)); } } }
     const combined = new Float32Array(finalR.length + newPos.length); combined.set(finalR); combined.set(newPos, finalR.length);
     const finalGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(combined, 3));
-    const repaired = params.holeFillEnabled ? await repairGeometry(finalGeo) : finalGeo;
+    const repaired = params.holeFillEnabled ? await repairGeometry(finalGeo, params.holeFillThreshold) : finalGeo;
     repaired.computeVertexNormals();
     return repaired;
 }

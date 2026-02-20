@@ -1,6 +1,6 @@
 import React, { Suspense, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
-import { OrbitControls, Grid, GizmoHelper, GizmoViewport, Bounds, Edges } from '@react-three/drei';
+import { OrbitControls, Grid, GizmoHelper, GizmoViewport, Bounds } from '@react-three/drei';
 import { useStore } from '../../store/useStore';
 import * as THREE from 'three';
 import { generateSelectionGeometry, segmentMesh, generateClassificationGeometry } from '../../utils/selectionUtils';
@@ -19,6 +19,9 @@ const Model = ({ model }: { model: any }) => {
     const addSelection = useStore((state) => state.addToSmartSelection);
     const removeSelection = useStore((state) => state.removeFromSmartSelection);
     const selection = useStore((state) => state.smartSelection[model.id] || EMPTY_ARRAY);
+    const boundaryEdges = useStore((state) => state.boundaryEdges[model.id]);
+    const fillableEdges = useStore((state) => state.fillableEdges[model.id]);
+    const unfillableEdges = useStore((state) => state.unfillableEdges[model.id]);
 
     const historyPreviewId = useStore((state) => state.historyPreviewId);
     const selectedHistoryIds = useStore((state) => state.selectedHistoryIds);
@@ -111,6 +114,74 @@ const Model = ({ model }: { model: any }) => {
         }
     };
 
+    // Ensure bounding box/sphere are precomputed and valid (prevents Bounds crash)
+    React.useEffect(() => {
+        const geo = model.bufferGeometry;
+        if (geo.attributes.position) {
+            const arr = geo.attributes.position.array as Float32Array;
+            let nan = 0;
+            for (let i = 0; i < arr.length; i++) {
+                if (!Number.isFinite(arr[i])) { arr[i] = 0; nan++; }
+            }
+            if (nan > 0) {
+                console.warn(`[Model] Sanitized ${nan} NaN position values in model ${model.id}`);
+                geo.attributes.position.needsUpdate = true;
+            }
+        }
+        if (geo.attributes.normal) {
+            const arr = geo.attributes.normal.array as Float32Array;
+            for (let i = 0; i < arr.length; i++) {
+                if (!Number.isFinite(arr[i])) arr[i] = 0;
+            }
+        }
+        geo.computeBoundingBox();
+        geo.computeBoundingSphere();
+    }, [model.bufferGeometry, model.meshVersion, model.id]);
+
+    // Safe edges geometry: EdgesGeometry can produce NaN on degenerate meshes
+    const safeEdgesGeo = React.useMemo(() => {
+        if (!showEdges) return null;
+        try {
+            const edgesGeo = new THREE.EdgesGeometry(model.bufferGeometry, 15);
+            // Sanitize edge positions
+            if (edgesGeo.attributes.position) {
+                const arr = edgesGeo.attributes.position.array as Float32Array;
+                for (let i = 0; i < arr.length; i++) {
+                    if (!Number.isFinite(arr[i])) arr[i] = 0;
+                }
+            }
+            edgesGeo.computeBoundingBox();
+            edgesGeo.computeBoundingSphere();
+            return edgesGeo;
+        } catch (e) {
+            console.warn('[Model] EdgesGeometry failed:', e);
+            return null;
+        }
+    }, [model.bufferGeometry, model.meshVersion, showEdges]);
+
+    // Boundary edges geometry for highlighting non-manifold/open edges
+    const boundaryGeo = React.useMemo(() => {
+        if (!boundaryEdges) return null;
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(boundaryEdges, 3));
+        return geo;
+    }, [boundaryEdges]);
+
+    // Live preview for mesh repair tools (watertight fill)
+    const fillableGeo = React.useMemo(() => {
+        if (!fillableEdges) return null;
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(fillableEdges, 3));
+        return geo;
+    }, [fillableEdges]);
+
+    const unfillableGeo = React.useMemo(() => {
+        if (!unfillableEdges) return null;
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(unfillableEdges, 3));
+        return geo;
+    }, [unfillableEdges]);
+
     return (
         <mesh
             geometry={model.bufferGeometry}
@@ -184,12 +255,38 @@ const Model = ({ model }: { model: any }) => {
                     />
                 </mesh>
             )}
-            {showEdges && (
-                <Edges
+            {safeEdgesGeo && (
+                <lineSegments
                     key={`edges-${model.id}-${model.meshVersion}`}
-                    threshold={15} // Only show edges with angle > 15 degrees
-                    color="#000000"
-                />
+                    geometry={safeEdgesGeo}
+                    renderOrder={3}
+                >
+                    <lineBasicMaterial color="#000000" />
+                </lineSegments>
+            )}
+            {boundaryGeo && !fillableGeo && !unfillableGeo && (
+                <lineSegments
+                    geometry={boundaryGeo}
+                    renderOrder={4}
+                >
+                    <lineBasicMaterial color="#ff6b00" linewidth={2} depthTest={false} />
+                </lineSegments>
+            )}
+            {fillableGeo && (
+                <lineSegments
+                    geometry={fillableGeo}
+                    renderOrder={4}
+                >
+                    <lineBasicMaterial color="#00ff00" linewidth={3} depthTest={false} />
+                </lineSegments>
+            )}
+            {unfillableGeo && (
+                <lineSegments
+                    geometry={unfillableGeo}
+                    renderOrder={4}
+                >
+                    <lineBasicMaterial color="#ff0000" linewidth={2} depthTest={false} opacity={0.5} transparent />
+                </lineSegments>
             )}
         </mesh>
     );
@@ -213,6 +310,34 @@ export const SceneView: React.FC = () => {
     const orbitControlsRef = React.useRef<any>(null);
 
     const [isLegendExpanded, setIsLegendExpanded] = useState(!isMobile);
+
+    // ── Global NaN guard: auto-fix any geometry with NaN positions ──
+    React.useEffect(() => {
+        const original = THREE.BufferGeometry.prototype.computeBoundingBox;
+        THREE.BufferGeometry.prototype.computeBoundingBox = function (this: THREE.BufferGeometry) {
+            original.call(this);
+            if (this.boundingBox) {
+                const { min, max } = this.boundingBox;
+                if ([min.x, min.y, min.z, max.x, max.y, max.z].some(v => !Number.isFinite(v))) {
+                    const pos = this.attributes.position;
+                    if (pos) {
+                        const arr = pos.array as Float32Array;
+                        let fixed = 0;
+                        for (let i = 0; i < arr.length; i++) {
+                            if (!Number.isFinite(arr[i])) { arr[i] = 0; fixed++; }
+                        }
+                        if (fixed > 0) {
+                            console.warn(`[NaN Guard] Fixed ${fixed} NaN values in geometry ${this.uuid} (posCount=${pos.count}, arrayLen=${arr.length})`);
+                            pos.needsUpdate = true;
+                            // Recompute with clean data
+                            original.call(this);
+                        }
+                    }
+                }
+            }
+        };
+        return () => { THREE.BufferGeometry.prototype.computeBoundingBox = original; };
+    }, []);
 
     React.useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
@@ -405,13 +530,13 @@ export const SceneView: React.FC = () => {
                             }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                     <span style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>Angle</span>
-                                    <span style={{ fontSize: '10px', color: 'var(--accent-primary)', fontWeight: 'bold' }}>{classificationAngle}°</span>
+                                    <span style={{ fontSize: '10px', color: 'var(--accent-primary)', fontWeight: 'bold' }}>{classificationAngle.toFixed(1)}°</span>
                                 </div>
                                 <input
                                     type="range"
-                                    min="0.5"
+                                    min="0.2"
                                     max="45"
-                                    step="0.5"
+                                    step="0.2"
                                     value={classificationAngle}
                                     onChange={(e) => setClassificationAngle(parseFloat(e.target.value))}
                                     style={{
