@@ -11,7 +11,6 @@ export interface KnurlingParams {
     depth: number;
     angle: number;
     pattern: KnurlPattern;
-    holeFillThreshold: number;
     holeFillEnabled: boolean;
 }
 
@@ -22,7 +21,6 @@ export interface HoneycombParams {
     depth: number;
     angle: number;
     direction: 'inward' | 'outward';
-    holeFillThreshold: number;
     holeFillEnabled: boolean;
 }
 
@@ -30,7 +28,6 @@ export interface FuzzySkinParams {
     type: 'fuzzy';
     thickness: number;
     pointDistance: number;
-    holeFillThreshold: number;
     holeFillEnabled: boolean;
 }
 
@@ -556,7 +553,7 @@ export async function applyKnurling(
 
                                 const vMid = new THREE.Vector3().lerpVectors(vBaseA, vBaseB, 0.5);
 
-                                if (isOnAnySegmentGrid(vMid, islandBoundaryGrid, 1e-4)) {
+                                if (isOnAnySegmentGrid(vMid, islandBoundaryGrid, 1e-2)) {
                                     const pA_u = proj.fromRot(pA.u, pA.v);
                                     const pB_u = proj.fromRot(pB.u, pB.v);
 
@@ -632,7 +629,7 @@ export async function applyKnurling(
     finalGeo.setIndex(newIndices);
 
     // Repair manifoldness if absolutely necessary, but topology *should* be perfect now
-    const repaired = params.holeFillEnabled ? await repairWithManifold(finalGeo, { holeDiameterMultiplier: params.holeFillThreshold }) : finalGeo;
+    const repaired = params.holeFillEnabled ? await repairWithManifold(finalGeo, { holeDiameterMultiplier: 20.0, edgeMultiplier: 6.0 }) : finalGeo;
     repaired.computeVertexNormals();
     return repaired;
 }
@@ -850,7 +847,7 @@ export async function applyHoneycomb(
 
                                 const vMid = new THREE.Vector3().lerpVectors(vBaseA, vBaseB, 0.5);
 
-                                if (isOnAnySegmentGrid(vMid, islandBoundaryGrid, 1e-4)) {
+                                if (isOnAnySegmentGrid(vMid, islandBoundaryGrid, 1e-2)) {
                                     const pA_u = proj.fromRot(pA.u, pA.v);
                                     const pB_u = proj.fromRot(pB.u, pB.v);
 
@@ -926,7 +923,7 @@ export async function applyHoneycomb(
     finalGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertices), 3));
     finalGeo.setIndex(newIndices);
 
-    const repaired = params.holeFillEnabled ? await repairWithManifold(finalGeo, { holeDiameterMultiplier: params.holeFillThreshold }) : finalGeo;
+    const repaired = params.holeFillEnabled ? await repairWithManifold(finalGeo, { holeDiameterMultiplier: 20.0, edgeMultiplier: 6.0 }) : finalGeo;
     repaired.computeVertexNormals();
     return repaired;
 }
@@ -959,7 +956,8 @@ export async function applyFuzzySkin(
         return idx;
     };
 
-    const clampDist = params.holeFillThreshold;
+    // We use a clamp distance proportional to the point distance to ensure smooth boundary falloff.
+    const clampDist = params.pointDistance * 1.5;
     const index = geometry.index;
 
     islands.forEach(islandIndices => {
@@ -1120,7 +1118,7 @@ export async function applyFuzzySkin(
     finalGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertices), 3));
     finalGeo.setIndex(newIndices);
 
-    const repaired = params.holeFillEnabled ? await repairWithManifold(finalGeo, { holeDiameterMultiplier: params.holeFillThreshold }) : finalGeo;
+    const repaired = params.holeFillEnabled ? await repairWithManifold(finalGeo, { holeDiameterMultiplier: 20.0, edgeMultiplier: 6.0 }) : finalGeo;
     repaired.computeVertexNormals();
     return repaired;
 }

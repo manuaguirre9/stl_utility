@@ -67,7 +67,7 @@ function computeAvgEdgeLength(mesh: IndexedMesh): number {
 function buildIndexedMesh(geometry: THREE.BufferGeometry): IndexedMesh {
     const posAttr = geometry.attributes.position;
     const index = geometry.index;
-    const PREC = 1e5;
+    const PREC = 1e3;
     const vertexMap = new Map<string, number>();
     const vertices: number[] = [];
     const faces: number[] = [];
@@ -174,8 +174,8 @@ function resolveTJunctions(mesh: IndexedMesh): number {
             const edgeLenSq = uvx * uvx + uvy * uvy + uvz * uvz;
             if (edgeLenSq < 1e-8) continue;
 
-            let bestVert = -1;
-            let bestT = 1;
+            // Find ALL collinear points for this edge
+            const collinearVerts: { p: number, t: number }[] = [];
 
             // Spatial query
             const gsx = Math.floor(minX / gridSize), gex = Math.floor(maxX / gridSize);
@@ -200,9 +200,8 @@ function resolveTJunctions(mesh: IndexedMesh): number {
                             if (t > 1e-4 && t < 1 - 1e-4) {
                                 const projX = ux + t * uvx, projY = uy + t * uvy, projZ = uz + t * uvz;
                                 const distSq = (px - projX) ** 2 + (py - projY) ** 2 + (pz - projZ) ** 2;
-                                if (distSq < 1e-6 && t < bestT) {
-                                    bestT = t;
-                                    bestVert = p;
+                                if (distSq < 1e-8) {
+                                    collinearVerts.push({ p, t });
                                 }
                             }
                         }
@@ -210,13 +209,26 @@ function resolveTJunctions(mesh: IndexedMesh): number {
                 }
             }
 
-            if (bestVert !== -1) {
+            if (collinearVerts.length > 0) {
+                // Sort by distance from u to v
+                collinearVerts.sort((a, b) => a.t - b.t);
+
+                // Replace the original face with the first slice of the fan
                 mesh.faces[e.faceIdx * 3 + 0] = e.u;
-                mesh.faces[e.faceIdx * 3 + 1] = bestVert;
+                mesh.faces[e.faceIdx * 3 + 1] = collinearVerts[0].p;
                 mesh.faces[e.faceIdx * 3 + 2] = e.opp;
-                mesh.faces.push(bestVert, e.v, e.opp);
                 modifiedFaces.add(e.faceIdx);
                 splits++;
+
+                // Add intermediate slices
+                for (let i = 0; i < collinearVerts.length - 1; i++) {
+                    mesh.faces.push(collinearVerts[i].p, collinearVerts[i + 1].p, e.opp);
+                    splits++;
+                }
+
+                // Add the final slice
+                mesh.faces.push(collinearVerts[collinearVerts.length - 1].p, e.v, e.opp);
+
                 changed = true;
             }
         }

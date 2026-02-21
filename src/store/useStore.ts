@@ -92,9 +92,9 @@ interface AppState {
     setIsProcessing: (val: boolean, status?: string) => void;
     subdivideSelection: (modelId: string, steps: number) => void;
     applyTexturize: (modelId: string, params:
-        | { type: 'knurling', pitch: number, depth: number, angle: number, pattern: KnurlPattern, holeFillThreshold: number, holeFillEnabled: boolean }
-        | { type: 'honeycomb', cellSize: number, wallThickness: number, depth: number, angle: number, direction: 'inward' | 'outward', holeFillThreshold: number, holeFillEnabled: boolean }
-        | { type: 'fuzzy', thickness: number, pointDistance: number, holeFillThreshold: number, holeFillEnabled: boolean }
+        | { type: 'knurling', pitch: number, depth: number, angle: number, pattern: KnurlPattern, holeFillEnabled: boolean }
+        | { type: 'honeycomb', cellSize: number, wallThickness: number, depth: number, angle: number, direction: 'inward' | 'outward', holeFillEnabled: boolean }
+        | { type: 'fuzzy', thickness: number, pointDistance: number, holeFillEnabled: boolean }
         | { type: 'decimate', reduction: number }
     ) => void;
     applyManifoldRepair: (modelId: string, options?: import('../utils/manifoldRepairService').RepairOptions) => Promise<void>;

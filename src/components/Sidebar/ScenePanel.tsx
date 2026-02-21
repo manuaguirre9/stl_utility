@@ -45,7 +45,6 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const [knurlPattern, setKnurlPattern] = useState<KnurlPattern>('diamond');
     const [reductionRatio, setReductionRatio] = useState(0.5);
     const [direction, setDirection] = useState<'inward' | 'outward'>('inward');
-    const [holeFillThreshold, setHoleFillThreshold] = useState(0.5);
     const [holeFillEnabled, setHoleFillEnabled] = useState(true);
     const [fuzzyThickness, setFuzzyThickness] = useState(0.2);
     const [pointDistance, setPointDistance] = useState(0.2);
@@ -67,7 +66,6 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                 if (reEditParams.wallThickness !== undefined) setWallThickness(reEditParams.wallThickness);
                 if (reEditParams.reduction !== undefined) setReductionRatio(reEditParams.reduction);
                 if (reEditParams.direction) setDirection(reEditParams.direction);
-                if (reEditParams.holeFillThreshold !== undefined) setHoleFillThreshold(reEditParams.holeFillThreshold);
                 if (reEditParams.holeFillEnabled !== undefined) setHoleFillEnabled(reEditParams.holeFillEnabled);
                 if (reEditParams.thickness !== undefined) setFuzzyThickness(reEditParams.thickness);
                 if (reEditParams.pointDistance !== undefined) setPointDistance(reEditParams.pointDistance);
@@ -177,7 +175,7 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
             // Recalculate existing operation
             const params = transformMode === 'subdivide'
                 ? { steps: subdivideSteps }
-                : { type: textureType, pitch, depth, angle, pattern: knurlPattern, cellSize, wallThickness, reduction: reductionRatio, direction, holeFillThreshold, holeFillEnabled, thickness: fuzzyThickness, pointDistance };
+                : { type: textureType, pitch, depth, angle, pattern: knurlPattern, cellSize, wallThickness, reduction: reductionRatio, direction, holeFillEnabled, thickness: fuzzyThickness, pointDistance };
             recalculateHistoryItem(selectedHistoryIds[0], params);
         } else if (selectedModel) {
             // Apply new operation
@@ -185,11 +183,11 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                 subdivideSelection(selectedModel.id, subdivideSteps);
             } else if (transformMode === 'texturize') {
                 if (textureType === 'knurling') {
-                    applyTexturize(selectedModel.id, { type: 'knurling', pitch, depth, angle, pattern: knurlPattern, holeFillThreshold, holeFillEnabled });
+                    applyTexturize(selectedModel.id, { type: 'knurling', pitch, depth, angle, pattern: knurlPattern, holeFillEnabled });
                 } else if (textureType === 'honeycomb') {
-                    applyTexturize(selectedModel.id, { type: 'honeycomb', cellSize, wallThickness, depth, angle, direction, holeFillThreshold, holeFillEnabled });
+                    applyTexturize(selectedModel.id, { type: 'honeycomb', cellSize, wallThickness, depth, angle, direction, holeFillEnabled });
                 } else if (textureType === 'fuzzy') {
-                    applyTexturize(selectedModel.id, { type: 'fuzzy', thickness: fuzzyThickness, pointDistance, holeFillThreshold, holeFillEnabled });
+                    applyTexturize(selectedModel.id, { type: 'fuzzy', thickness: fuzzyThickness, pointDistance, holeFillEnabled });
                 } else if (textureType === 'decimate') {
                     applyTexturize(selectedModel.id, { type: 'decimate', reduction: reductionRatio });
                 }
@@ -808,8 +806,8 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
 
                                         {(textureType === 'knurling' || textureType === 'honeycomb' || textureType === 'fuzzy') && (
                                             <div style={{ padding: '12px', backgroundColor: 'rgba(255, 107, 0, 0.05)', borderRadius: '4px', border: '1px dashed rgba(255, 107, 0, 0.2)' }}>
-                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                                                    <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Anti-Tearing Repair</label>
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                    <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Watertight Seal</label>
                                                     <button onClick={() => setHoleFillEnabled(!holeFillEnabled)} style={{
                                                         padding: '4px 8px', fontSize: '10px',
                                                         backgroundColor: holeFillEnabled ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
@@ -818,21 +816,6 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                                         {holeFillEnabled ? 'ON' : 'OFF'}
                                                     </button>
                                                 </div>
-                                                {holeFillEnabled && (
-                                                    <>
-                                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                            <label style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Threshold</label>
-                                                            <span style={{ fontSize: '12px', color: 'var(--accent-primary)', fontWeight: '600' }}>{holeFillThreshold.toFixed(1)} mm</span>
-                                                        </div>
-                                                        <input type="range" min="0.1" max="5.0" step="0.1" value={holeFillThreshold}
-                                                            onChange={(e) => setHoleFillThreshold(parseFloat(e.target.value))}
-                                                            style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
-                                                        />
-                                                        <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px', fontStyle: 'italic' }}>
-                                                            Fills gaps smaller than this value on selection borders.
-                                                        </div>
-                                                    </>
-                                                )}
                                             </div>
                                         )}
 
