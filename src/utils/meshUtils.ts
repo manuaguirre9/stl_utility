@@ -276,7 +276,7 @@ export function estimateSelectionCircumference(
 export function getContiguousIslands(
     geometry: THREE.BufferGeometry,
     faceIndices: number[],
-    angleThresholdDeg: number = 20 // Lower threshold to split cylinder/cone transitions
+    angleThresholdDeg: number = 10 // Lowered from 20 to better split plane/cylinder junctions
 ): number[][] {
     if (faceIndices.length === 0) return [];
 
@@ -304,7 +304,7 @@ export function getContiguousIslands(
     // Key function for vertices to handle slight floating point issues
     const getVKey = (fIdx: number, vIdxInFace: number) => {
         const idx = index ? index.getX(fIdx * 3 + vIdxInFace) : fIdx * 3 + vIdxInFace;
-        return `${Math.round(posAttr.getX(idx) * 10000)},${Math.round(posAttr.getY(idx) * 10000)},${Math.round(posAttr.getZ(idx) * 10000)}`;
+        return `${Math.round(posAttr.getX(idx) * 1000)},${Math.round(posAttr.getY(idx) * 1000)},${Math.round(posAttr.getZ(idx) * 1000)}`;
     };
 
     // Build vertex-to-face adjacency (only for the selected faces)
@@ -389,7 +389,7 @@ export function fitCylinderToSelection(
     const avgN = new THREE.Vector3(); normals.forEach(n => avgN.add(n)); avgN.divideScalar(normals.length);
     const avgN_norm = avgN.clone().normalize();
     let nVar = 0; normals.forEach(n => nVar += (1 - Math.abs(n.dot(avgN_norm)))); nVar /= normals.length;
-    const isPlanar = nVar < 0.01;
+    const isPlanar = nVar < 0.2; // Significantly more lenient to capture noisy planar selections
 
     if (isPlanar) {
         const origin = centroids.reduce((acc, c) => acc.add(c), new THREE.Vector3()).divideScalar(centroids.length);
@@ -397,7 +397,7 @@ export function fitCylinderToSelection(
     }
 
     let axis = new THREE.Vector3(1, 1, 1).normalize();
-    const meanN = avgN.clone(); // Raw mean vector [0..1]
+    const meanN = avgN.clone();
     let mxx = 0, mxy = 0, mxz = 0, myy = 0, myz = 0, mzz = 0;
     normals.forEach(n => {
         const dx = n.x - meanN.x, dy = n.y - meanN.y, dz = n.z - meanN.z;
@@ -415,14 +415,22 @@ export function fitCylinderToSelection(
     if (Math.abs(up.y) < 0.9) right.set(0, 1, 0).cross(up).normalize(); else right.set(1, 0, 0).cross(up).normalize();
     const fwd = new THREE.Vector3().crossVectors(up, right).normalize();
 
-    let sUU = 0, sUV = 0, sVV = 0, bU = 0, bV = 0;
+    let sUU = 0, sUV = 0, sVV = 0, bU = 0, bV = 0, validNormals = 0;
     centroids.forEach((q, idx) => {
         const n = normals[idx].clone().projectOnPlane(up).normalize();
         if (n.lengthSq() < 0.001) return;
+        validNormals++;
         const qu = q.dot(right), qv = q.dot(fwd), nu = n.dot(right), nv = n.dot(fwd);
         const aa = 1 - nu * nu, ab = -nu * nv, ac = 1 - nv * nv;
         sUU += aa; sUV += ab; sVV += ac; bU += aa * qu + ab * qv; bV += ab * qu + ac * qv;
     });
+
+    if (validNormals < 3) {
+        // Fallback to Planar if we can't find enough radial variation for a cylinder
+        const origin = centroids.reduce((acc, c) => acc.add(c), new THREE.Vector3()).divideScalar(centroids.length);
+        return { isPlanar: true, avgN: avgN_norm, origin, axisOrigin: origin, up: avgN_norm, avgR: 1, m: 0, b: 1, isFlipped: false };
+    }
+
     const det = sUU * sVV - sUV * sUV;
     const axisOrigin = (Math.abs(det) > 1e-8) ? right.clone().multiplyScalar((sVV * bU - sUV * bV) / det).add(fwd.clone().multiplyScalar((sUU * bV - sUV * bU) / det)) : centroids[0].clone();
 
@@ -442,6 +450,12 @@ export function fitCylinderToSelection(
 
     const avgH = (centroids.reduce((s, c) => s + c.dot(up), 0) / centroids.length) - axisOrigin.dot(up);
     const avgR = b + m * avgH;
+
+    if (avgR < 0.1) {
+        // Another fallback to planar if radius is suspiciously small (likely a flat selection)
+        const origin = centroids.reduce((acc, c) => acc.add(c), new THREE.Vector3()).divideScalar(centroids.length);
+        return { isPlanar: true, avgN: avgN_norm, origin, axisOrigin: origin, up: avgN_norm, avgR: 1, m: 0, b: 1, isFlipped: false };
+    }
 
     return { isPlanar: false, up, axisOrigin, m, b, avgR, isFlipped };
 }

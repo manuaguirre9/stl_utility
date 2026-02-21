@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { getContiguousIslands, subdivideTriangles, subdivideSelectedFacesToSize, fitCylinderToSelection } from './meshUtils';
+import { getContiguousIslands, subdivideTriangles, fitCylinderToSelection } from './meshUtils';
 import { repairWithManifold } from './manifoldRepairService';
 
 export type KnurlPattern = 'diamond' | 'straight' | 'diagonal' | 'square';
@@ -305,7 +305,7 @@ export async function applyKnurling(
 
     const index = geometry.index;
     const posAttr = geometry.attributes.position;
-    const islands = getContiguousIslands(geometry, faceIndices);
+    const islands = getContiguousIslands(geometry, faceIndices, 10); // Use stricter splitting
 
     // --- TOPOLOGICAL INDEXING SETUP ---
     const vertexMap = new Map<string, number>();
@@ -313,7 +313,7 @@ export async function applyKnurling(
     const newIndices: number[] = [];
 
     const getVertIndex = (x: number, y: number, z: number): number => {
-        const key = `${Math.round(x * 1e5)},${Math.round(y * 1e5)},${Math.round(z * 1e5)}`;
+        const key = `${Math.round(x * 1e3)},${Math.round(y * 1e3)},${Math.round(z * 1e3)}`;
         let idx = vertexMap.get(key);
         if (idx === undefined) {
             idx = vertices.length / 3;
@@ -323,13 +323,13 @@ export async function applyKnurling(
         return idx;
     };
 
-    // Pre-compute boundary segments for wall generation
-    const boundarySegments = getBoundarySegments(geometry, faceIndices);
-    const boundaryGrid = createBoundaryGrid(boundarySegments, 2.0);
-    console.log(`[Knurling] Found ${boundarySegments.length} boundary segments.`);
     let wallCount = 0;
 
     islands.forEach(islandIndices => {
+        // PER-ISLAND BOUNDARY DETECTION: Essential for correct wall generation in multi-selections
+        const islandBoundarySegments = getBoundarySegments(geometry, islandIndices);
+        const islandBoundaryGrid = createBoundaryGrid(islandBoundarySegments, 2.0);
+
         const islandPos = new Float32Array(islandIndices.length * 9);
         islandIndices.forEach((fIdx, i) => {
             const i0 = index ? index.getX(fIdx * 3 + 0) : fIdx * 3 + 0;
@@ -347,7 +347,20 @@ export async function applyKnurling(
         const subCount = subPos.length / 9;
 
         const proj = createProjectionData(geometry, islandIndices, params.angle);
-        if (!proj) return;
+        if (!proj) {
+            // SAFE FALLBACK: If projection fails for this island, keep original triangles 
+            // so the geometry doesn't disappear in multi-selections.
+            islandIndices.forEach(fIdx => {
+                const i0 = index ? index.getX(fIdx * 3 + 0) : fIdx * 3 + 0;
+                const i1 = index ? index.getX(fIdx * 3 + 1) : fIdx * 3 + 1;
+                const i2 = index ? index.getX(fIdx * 3 + 2) : fIdx * 3 + 2;
+                const a = getVertIndex(posAttr.getX(i0), posAttr.getY(i0), posAttr.getZ(i0));
+                const b = getVertIndex(posAttr.getX(i1), posAttr.getY(i1), posAttr.getZ(i1));
+                const c = getVertIndex(posAttr.getX(i2), posAttr.getY(i2), posAttr.getZ(i2));
+                newIndices.push(a, b, c);
+            });
+            return;
+        }
 
         // Calculate pitch variables based on whether the geometry is planar or cylindrical
         const nD_nom = Math.round(proj.circPhys / params.pitch);
@@ -480,7 +493,7 @@ export async function applyKnurling(
 
                                 const vMid = new THREE.Vector3().lerpVectors(vBaseA, vBaseB, 0.5);
 
-                                if (isOnAnySegmentGrid(vMid, boundaryGrid, 1e-4)) {
+                                if (isOnAnySegmentGrid(vMid, islandBoundaryGrid, 1e-4)) {
                                     const pA_u = proj.fromRot(pA.u, pA.v);
                                     const pB_u = proj.fromRot(pB.u, pB.v);
 
@@ -556,7 +569,7 @@ export async function applyHoneycomb(
 
     const index = geometry.index;
     const posAttr = geometry.attributes.position;
-    const islands = getContiguousIslands(geometry, faceIndices);
+    const islands = getContiguousIslands(geometry, faceIndices, 10); // Explicitly split plane/cylinder junctions
 
     // --- TOPOLOGICAL INDEXING SETUP ---
     const vertexMap = new Map<string, number>();
@@ -574,13 +587,12 @@ export async function applyHoneycomb(
         return idx;
     };
 
-    // Boundary segments for wall stitching
-    const boundarySegments = getBoundarySegments(geometry, faceIndices);
-    const boundaryGrid = createBoundaryGrid(boundarySegments, 2.0);
-    console.log(`[Honeycomb] Found ${boundarySegments.length} boundary segments.`);
     let wallCount = 0;
 
     islands.forEach(islandIndices => {
+        const islandBoundarySegments = getBoundarySegments(geometry, islandIndices);
+        const islandBoundaryGrid = createBoundaryGrid(islandBoundarySegments, 2.0);
+
         const islandPos = new Float32Array(islandIndices.length * 9);
         islandIndices.forEach((fIdx, i) => {
             const i0 = index ? index.getX(fIdx * 3 + 0) : fIdx * 3 + 0;
@@ -597,7 +609,18 @@ export async function applyHoneycomb(
         const subCount = subPos.length / 9;
 
         const proj = createProjectionData(geometry, islandIndices, params.angle);
-        if (!proj) return;
+        if (!proj) {
+            islandIndices.forEach(fIdx => {
+                const i0 = index ? index.getX(fIdx * 3 + 0) : fIdx * 3 + 0;
+                const i1 = index ? index.getX(fIdx * 3 + 1) : fIdx * 3 + 1;
+                const i2 = index ? index.getX(fIdx * 3 + 2) : fIdx * 3 + 2;
+                const a = getVertIndex(posAttr.getX(i0), posAttr.getY(i0), posAttr.getZ(i0));
+                const b = getVertIndex(posAttr.getX(i1), posAttr.getY(i1), posAttr.getZ(i1));
+                const c = getVertIndex(posAttr.getX(i2), posAttr.getY(i2), posAttr.getZ(i2));
+                newIndices.push(a, b, c);
+            });
+            return;
+        }
 
         let { cellSize: W, wallThickness: t, depth, direction, angle: userAngle } = params;
 
@@ -735,7 +758,7 @@ export async function applyHoneycomb(
 
                                 const vMid = new THREE.Vector3().lerpVectors(vBaseA, vBaseB, 0.5);
 
-                                if (isOnAnySegmentGrid(vMid, boundaryGrid, 1e-4)) {
+                                if (isOnAnySegmentGrid(vMid, islandBoundaryGrid, 1e-4)) {
                                     const pA_u = proj.fromRot(pA.u, pA.v);
                                     const pB_u = proj.fromRot(pB.u, pB.v);
 
@@ -828,15 +851,13 @@ export async function applyFuzzySkin(
         return idx;
     };
 
-    // Fuzzy Skin does not need complex perimeter wall generation like knurling/honeycomb.
-    // Instead, to keep boundaries watertight with the original, we just CLAMP the applied noise
-    // to 0 for any points that fall smoothly within the fuzzy skin edge seam.
-    const boundarySegments = getBoundarySegments(geometry, faceIndices);
-    const boundaryGrid = createBoundaryGrid(boundarySegments, 2.0);
     const clampDist = params.holeFillThreshold;
-
     const index = geometry.index;
+
     islands.forEach(islandIndices => {
+        const islandBoundarySegments = getBoundarySegments(geometry, islandIndices);
+        const islandBoundaryGrid = createBoundaryGrid(islandBoundarySegments, 2.0);
+
         const islandPos = new Float32Array(islandIndices.length * 9);
         islandIndices.forEach((fIdx, i) => {
             const i0 = index ? index.getX(fIdx * 3 + 0) : fIdx * 3 + 0;
@@ -875,10 +896,9 @@ export async function applyFuzzySkin(
             currentSubPos = subdivideTriangles(currentSubPos, 1) as Float32Array;
         }
 
-        // 2. Mesh Context for jitter
         let subGeo = new THREE.BufferGeometry();
         subGeo.setAttribute('position', new THREE.BufferAttribute(currentSubPos, 3));
-        subGeo = weldGeometry(subGeo, 10000);
+        subGeo = weldGeometry(subGeo, 1000);
         subGeo.computeVertexNormals();
 
         const positions = subGeo.attributes.position.array as any as Float32Array;
@@ -893,7 +913,7 @@ export async function applyFuzzySkin(
             // Check border collision using the high-performance Spatial Hash grid.
             // If the point is within the `clampDist` distance of a boundary, we apply 0 noise
             // so the generated geometry remains perfectly flush and manifold with the rest of the model.
-            if (isOnAnySegmentGrid(p, boundaryGrid, clampDist)) {
+            if (isOnAnySegmentGrid(p, islandBoundaryGrid, clampDist)) {
                 noise = 0;
             }
 

@@ -618,56 +618,38 @@ export const useStore = create<AppState>((set, get) => ({
             // Allow UI to paint overlay
             await new Promise(resolve => setTimeout(resolve, 50));
 
-            const islands = getContiguousIslands(model.bufferGeometry, selection)
-                .sort((a, b) => Math.min(...a) - Math.min(...b));
+            let nextGeometry = model.bufferGeometry;
 
-            let currentGeometry = model.bufferGeometry;
-            const processedOriginals = new Set<number>();
-
+            // Clear smart selection before processing
             set({ smartSelection: { ...get().smartSelection, [modelId]: [] } });
 
-            for (let idx = 0; idx < islands.length; idx++) {
-                const island = islands[idx];
-                const translatedIsland = island.map(origIdx => {
-                    let shift = 0;
-                    processedOriginals.forEach(o => { if (o < origIdx) shift++; });
-                    return origIdx - shift;
-                });
-
-                let nextGeometry = currentGeometry;
-                if (params.type === 'knurling') {
-                    nextGeometry = await applyKnurling(currentGeometry, translatedIsland, params);
-                } else if (params.type === 'honeycomb') {
-                    nextGeometry = await applyHoneycomb(currentGeometry, translatedIsland, params);
-                } else if (params.type === 'fuzzy') {
-                    nextGeometry = await applyFuzzySkin(currentGeometry, translatedIsland, params);
-                } else if (params.type === 'decimate') {
-                    nextGeometry = applyDecimate(currentGeometry, translatedIsland, params);
-                }
-
-                island.forEach(i => processedOriginals.add(i));
-                currentGeometry = nextGeometry;
-
-                set((state) => ({
-                    models: state.models.map(m => m.id === modelId ? { ...m, bufferGeometry: currentGeometry, meshVersion: m.meshVersion + 1 } : m)
-                }));
-
-                let historyAction: HistoryAction;
-                if (params.type === 'knurling') {
-                    historyAction = { type: 'TEXTURIZE_KNURLING', modelId, params: { ...params } as any, selection: translatedIsland };
-                } else if (params.type === 'honeycomb') {
-                    historyAction = { type: 'TEXTURIZE_HONEYCOMB', modelId, params: { ...params } as any, selection: translatedIsland };
-                } else if (params.type === 'fuzzy') {
-                    historyAction = { type: 'TEXTURIZE_FUZZY', modelId, params: { ...params } as any, selection: translatedIsland };
-                } else {
-                    historyAction = { type: 'TEXTURIZE_DECIMATE', modelId, params: { ...params } as any, selection: translatedIsland };
-                }
-
-                get().recordHistory(`Texturize ${params.type} - Surface ${idx + 1}`, historyAction);
-                if (islands.length > 1 && idx < islands.length - 1) {
-                    set({ processingStatus: `Texturing: Part ${idx + 2} of ${islands.length}...` });
-                }
+            if (params.type === 'knurling') {
+                nextGeometry = await applyKnurling(model.bufferGeometry, selection, params);
+            } else if (params.type === 'honeycomb') {
+                nextGeometry = await applyHoneycomb(model.bufferGeometry, selection, params);
+            } else if (params.type === 'fuzzy') {
+                nextGeometry = await applyFuzzySkin(model.bufferGeometry, selection, params);
+            } else if (params.type === 'decimate') {
+                nextGeometry = applyDecimate(model.bufferGeometry, selection, params);
             }
+
+            set((state) => ({
+                models: state.models.map(m => m.id === modelId ? { ...m, bufferGeometry: nextGeometry, meshVersion: m.meshVersion + 1 } : m)
+            }));
+
+            let historyAction: HistoryAction;
+            if (params.type === 'knurling') {
+                historyAction = { type: 'TEXTURIZE_KNURLING', modelId, params: { ...params } as any, selection: selection };
+            } else if (params.type === 'honeycomb') {
+                historyAction = { type: 'TEXTURIZE_HONEYCOMB', modelId, params: { ...params } as any, selection: selection };
+            } else if (params.type === 'fuzzy') {
+                historyAction = { type: 'TEXTURIZE_FUZZY', modelId, params: { ...params } as any, selection: selection };
+            } else {
+                historyAction = { type: 'TEXTURIZE_DECIMATE', modelId, params: { ...params } as any, selection: selection };
+            }
+
+            get().recordHistory(`Texturize ${params.type}`, historyAction);
+
         } finally {
             // Buffer to ensure React has finished rendering the last geometry update
             await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
