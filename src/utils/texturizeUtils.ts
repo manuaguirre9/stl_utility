@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { getContiguousIslands, subdivideTriangles, fitCylinderToSelection } from './meshUtils';
+import { getContiguousIslands, subdivideTriangles, subdivideSelectedFacesToSize, fitCylinderToSelection } from './meshUtils';
 import { repairWithManifold } from './manifoldRepairService';
 
 export type KnurlPattern = 'diamond' | 'straight' | 'diagonal' | 'square';
@@ -37,7 +37,7 @@ export interface FuzzySkinParams {
 // SHARED UTILITIES
 // --------------------------------------------------------------------------------
 
-function weldGeometry(geo: THREE.BufferGeometry, prec: number = 100000): THREE.BufferGeometry {
+function weldGeometry(geo: THREE.BufferGeometry, prec: number = 1000): THREE.BufferGeometry {
     const pos = geo.attributes.position, vMap = new Map<string, number>(), nPos: number[] = [], indices: number[] = [];
     for (let i = 0; i < pos.count; i++) {
         const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i), h = `${Math.round(x * prec)},${Math.round(y * prec)},${Math.round(z * prec)}`;
@@ -80,7 +80,7 @@ function distSq(x1: number, y1: number, z1: number, x2: number, y2: number, z2: 
  */
 function getBoundarySegments(geometry: THREE.BufferGeometry, faceIndices: number[]): { a: THREE.Vector3, b: THREE.Vector3, lenSq: number, ab: THREE.Vector3 }[] {
     const posAttr = geometry.attributes.position;
-    const PREC = 1e5;
+    const PREC = 1e3;
     const vKey = (idx: number) => `${Math.round(posAttr.getX(idx) * PREC)},${Math.round(posAttr.getY(idx) * PREC)},${Math.round(posAttr.getZ(idx) * PREC)}`;
 
     const edgeMap = new Map<string, { a: THREE.Vector3, b: THREE.Vector3, count: number }>();
@@ -339,8 +339,11 @@ export async function applyKnurling(
             islandPos[i * 9 + 3] = posAttr.getX(i1); islandPos[i * 9 + 4] = posAttr.getY(i1); islandPos[i * 9 + 5] = posAttr.getZ(i1);
             islandPos[i * 9 + 6] = posAttr.getX(i2); islandPos[i * 9 + 7] = posAttr.getY(i2); islandPos[i * 9 + 8] = posAttr.getZ(i2);
         });
-        // STEP 1: Subdivide selection islands
-        const subPos = subdivideTriangles(islandPos, 2);
+
+        // STEP 1: Step-based Subdivision (to prevent exponential bloat on large faces)
+        // We use 2 steps for tight resolution, 1 step for large macro textures
+        const steps = params.pitch > 2.5 ? 1 : 2;
+        const subPos = subdivideTriangles(islandPos, steps);
         const subCount = subPos.length / 9;
 
         const proj = createProjectionData(geometry, islandIndices, params.angle);
@@ -561,7 +564,7 @@ export async function applyHoneycomb(
     const newIndices: number[] = [];
 
     const getVertIndex = (x: number, y: number, z: number): number => {
-        const key = `${Math.round(x * 1e5)},${Math.round(y * 1e5)},${Math.round(z * 1e5)}`;
+        const key = `${Math.round(x * 1e3)},${Math.round(y * 1e3)},${Math.round(z * 1e3)}`;
         let idx = vertexMap.get(key);
         if (idx === undefined) {
             idx = vertices.length / 3;
@@ -587,7 +590,10 @@ export async function applyHoneycomb(
             islandPos[i * 9 + 3] = posAttr.getX(i1); islandPos[i * 9 + 4] = posAttr.getY(i1); islandPos[i * 9 + 5] = posAttr.getZ(i1);
             islandPos[i * 9 + 6] = posAttr.getX(i2); islandPos[i * 9 + 7] = posAttr.getY(i2); islandPos[i * 9 + 8] = posAttr.getZ(i2);
         });
-        const subPos = subdivideTriangles(islandPos, 2);
+
+        // Step-based subdivision to prevent exponential face generation on large initial triangles
+        const steps = params.cellSize > 3.0 ? 1 : 2;
+        const subPos = subdivideTriangles(islandPos, steps);
         const subCount = subPos.length / 9;
 
         const proj = createProjectionData(geometry, islandIndices, params.angle);
@@ -812,7 +818,7 @@ export async function applyFuzzySkin(
     const newIndices: number[] = [];
 
     const getVertIndex = (x: number, y: number, z: number): number => {
-        const key = `${Math.round(x * 1e5)},${Math.round(y * 1e5)},${Math.round(z * 1e5)}`;
+        const key = `${Math.round(x * 1e3)},${Math.round(y * 1e3)},${Math.round(z * 1e3)}`;
         let idx = vertexMap.get(key);
         if (idx === undefined) {
             idx = vertices.length / 3;
@@ -843,7 +849,9 @@ export async function applyFuzzySkin(
 
         // 1. Homogeneous Density Calculation
         let currentSubPos: Float32Array<ArrayBufferLike> = islandPos;
-        const targetSq = params.pointDistance * params.pointDistance;
+        // Cap the point distance to avoid infinite/crashing subdivisions
+        const effectivePtDist = Math.max(0.1, params.pointDistance);
+        const targetSq = effectivePtDist * effectivePtDist;
         const MAX_STEPS = 6;
 
         for (let s = 0; s < MAX_STEPS; s++) {

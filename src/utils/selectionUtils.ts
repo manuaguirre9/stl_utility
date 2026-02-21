@@ -2,16 +2,15 @@
 import * as THREE from 'three';
 
 // Heuristic to build adjacency graph for non-indexed geometry (STL usually is non-indexed)
-// Returns map: faceIndex -> array of neighbor faceIndices (Shared Edge)
+// Returns array: faceIndex -> array of neighbor faceIndices (Shared Edge)
 export const buildAdjacencyGraph = (geometry: THREE.BufferGeometry, precision = 1e-3) => {
     const position = geometry.attributes.position;
     const index = geometry.index;
     const faceCount = index ? index.count / 3 : position.count / 3;
 
-    // Map vertex hash to list of faces sharing it
+    // 1. Hash to cluster coincident vertices
     const vertexToFaces = new Map<string, number[]>();
 
-    // Helper to hash a vertex with tolerance
     const hash = (x: number, y: number, z: number) => {
         const ix = Math.round(x / precision);
         const iy = Math.round(y / precision);
@@ -23,7 +22,6 @@ export const buildAdjacencyGraph = (geometry: THREE.BufferGeometry, precision = 
         for (let v = 0; v < 3; v++) {
             const vIdx = index ? index.getX(f * 3 + v) : f * 3 + v;
             const h = hash(position.getX(vIdx), position.getY(vIdx), position.getZ(vIdx));
-
             let faces = vertexToFaces.get(h);
             if (!faces) {
                 faces = [];
@@ -33,31 +31,80 @@ export const buildAdjacencyGraph = (geometry: THREE.BufferGeometry, precision = 
         }
     }
 
-    const adjacency: number[][] = Array.from({ length: faceCount }, () => []);
-    const pairCounts = new Map<string, number>();
+    // 2. Build explicit edge pairs for faces sharing AT LEAST ONE vertex
+    // We expect roughly 3 edges per face. Pre-allocate array to avoid GC/Memory pressure.
+    // Instead of Map strings which hits V8's 16.7M limit, we use a flat Int32Array [faceA, faceB, faceA, faceB...]
+    // We overestimate capacity slightly.
+    let edgeCapacity = faceCount * 12;
+    let edges = new Int32Array(edgeCapacity);
+    let edgePtr = 0;
 
-    // Two faces share an edge if they share 2 vertices.
     for (const faces of vertexToFaces.values()) {
-        if (faces.length < 2) continue;
-        for (let i = 0; i < faces.length; i++) {
-            for (let j = i + 1; j < faces.length; j++) {
-                const a = faces[i];
-                const b = faces[j];
+        const len = faces.length;
+        if (len < 2) continue;
+        for (let i = 0; i < len; i++) {
+            for (let j = i + 1; j < len; j++) {
+                let a = faces[i];
+                let b = faces[j];
                 if (a === b) continue;
+                if (a > b) { const t = a; a = b; b = t; } // Enforce a < b
 
-                const key = a < b ? `${a}_${b}` : `${b}_${a}`;
-                pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
+                if (edgePtr + 2 > edges.length) {
+                    const expanded = new Int32Array(edges.length * 2);
+                    expanded.set(edges);
+                    edges = expanded;
+                }
+                edges[edgePtr++] = a;
+                edges[edgePtr++] = b;
             }
         }
     }
 
-    pairCounts.forEach((count, key) => {
-        if (count >= 2) { // Shared edge
-            const [a, b] = key.split('_').map(Number);
+    // 3. Compact and pack edges into BigUint64Array for fast native sorting
+    // We pack (FaceA << 32) | FaceB. Since Face indices are < 4B, they fit in 32bits.
+    const pairCount = edgePtr / 2;
+    const packedEdges = new BigUint64Array(pairCount);
+    for (let i = 0; i < pairCount; i++) {
+        const a = BigInt(edges[i * 2]);
+        const b = BigInt(edges[i * 2 + 1]);
+        packedEdges[i] = (a << 32n) | b;
+    }
+
+    // Free the Int32Array to help the Garbage Collector
+    edges = new Int32Array(0);
+
+    // 4. Sort the packed array. Identical edge pairs will sit adjacent to each other.
+    packedEdges.sort();
+
+    // 5. Scan sorted array to find pairs that appear 2 or more times (meaning they share 2 vertices = an Edge)
+    const adjacency: number[][] = Array.from({ length: faceCount }, () => []);
+
+    if (pairCount > 0) {
+        let currentPair = packedEdges[0];
+        let runLength = 1;
+
+        for (let i = 1; i < pairCount; i++) {
+            if (packedEdges[i] === currentPair) {
+                runLength++;
+            } else {
+                if (runLength >= 2) {
+                    const a = Number(currentPair >> 32n);
+                    const b = Number(currentPair & 0xFFFFFFFFn);
+                    adjacency[a].push(b);
+                    adjacency[b].push(a);
+                }
+                currentPair = packedEdges[i];
+                runLength = 1;
+            }
+        }
+        // Check last run
+        if (runLength >= 2) {
+            const a = Number(currentPair >> 32n);
+            const b = Number(currentPair & 0xFFFFFFFFn);
             adjacency[a].push(b);
             adjacency[b].push(a);
         }
-    });
+    }
 
     return adjacency;
 };
