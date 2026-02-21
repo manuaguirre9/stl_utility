@@ -78,16 +78,17 @@ export function subdivideSelectedFacesToSize(
     if (faceIndices.length === 0 || targetSize <= 0) return geometry;
 
     const posAttr = geometry.attributes.position;
-    const totalFaces = posAttr.count / 3;
+    const index = geometry.index;
+    const totalFaces = index ? index.count / 3 : posAttr.count / 3;
     const selectedIndicesSet = new Set(faceIndices);
 
     let currentPositions: Float32Array = new Float32Array(faceIndices.length * 9);
     faceIndices.forEach((faceIdx, i) => {
-        const offset = faceIdx * 3;
         for (let v = 0; v < 3; v++) {
-            currentPositions[i * 9 + v * 3 + 0] = posAttr.getX(offset + v);
-            currentPositions[i * 9 + v * 3 + 1] = posAttr.getY(offset + v);
-            currentPositions[i * 9 + v * 3 + 2] = posAttr.getZ(offset + v);
+            const idx = index ? index.getX(faceIdx * 3 + v) : faceIdx * 3 + v;
+            currentPositions[i * 9 + v * 3 + 0] = posAttr.getX(idx);
+            currentPositions[i * 9 + v * 3 + 1] = posAttr.getY(idx);
+            currentPositions[i * 9 + v * 3 + 2] = posAttr.getZ(idx);
         }
     });
 
@@ -121,11 +122,11 @@ export function subdivideSelectedFacesToSize(
     const finalPositions = new Float32Array(finalTriangleCount * 9);
 
     unselectedFaces.forEach((faceIdx, i) => {
-        const srcOffset = faceIdx * 3;
         for (let v = 0; v < 3; v++) {
-            finalPositions[i * 9 + v * 3 + 0] = posAttr.getX(srcOffset + v);
-            finalPositions[i * 9 + v * 3 + 1] = posAttr.getY(srcOffset + v);
-            finalPositions[i * 9 + v * 3 + 2] = posAttr.getZ(srcOffset + v);
+            const idx = index ? index.getX(faceIdx * 3 + v) : faceIdx * 3 + v;
+            finalPositions[i * 9 + v * 3 + 0] = posAttr.getX(idx);
+            finalPositions[i * 9 + v * 3 + 1] = posAttr.getY(idx);
+            finalPositions[i * 9 + v * 3 + 2] = posAttr.getZ(idx);
         }
     });
 
@@ -155,7 +156,8 @@ export function subdivideSelectedFaces(
     if (steps <= 0 || faceIndices.length === 0) return geometry;
 
     const posAttr = geometry.attributes.position;
-    const totalFaces = posAttr.count / 3;
+    const index = geometry.index;
+    const totalFaces = index ? index.count / 3 : posAttr.count / 3;
     const selectedIndicesSet = new Set(faceIndices);
 
     const unselectedFaces: number[] = [];
@@ -165,11 +167,11 @@ export function subdivideSelectedFaces(
 
     const selectedPositions = new Float32Array(faceIndices.length * 9);
     faceIndices.forEach((faceIdx, i) => {
-        const offset = faceIdx * 3;
         for (let v = 0; v < 3; v++) {
-            selectedPositions[i * 9 + v * 3 + 0] = posAttr.getX(offset + v);
-            selectedPositions[i * 9 + v * 3 + 1] = posAttr.getY(offset + v);
-            selectedPositions[i * 9 + v * 3 + 2] = posAttr.getZ(offset + v);
+            const idx = index ? index.getX(faceIdx * 3 + v) : faceIdx * 3 + v;
+            selectedPositions[i * 9 + v * 3 + 0] = posAttr.getX(idx);
+            selectedPositions[i * 9 + v * 3 + 1] = posAttr.getY(idx);
+            selectedPositions[i * 9 + v * 3 + 2] = posAttr.getZ(idx);
         }
     });
 
@@ -179,11 +181,11 @@ export function subdivideSelectedFaces(
     const finalPositions = new Float32Array(finalTriangleCount * 9);
 
     unselectedFaces.forEach((faceIdx, i) => {
-        const srcOffset = faceIdx * 3;
         for (let v = 0; v < 3; v++) {
-            finalPositions[i * 9 + v * 3 + 0] = posAttr.getX(srcOffset + v);
-            finalPositions[i * 9 + v * 3 + 1] = posAttr.getY(srcOffset + v);
-            finalPositions[i * 9 + v * 3 + 2] = posAttr.getZ(srcOffset + v);
+            const idx = index ? index.getX(faceIdx * 3 + v) : faceIdx * 3 + v;
+            finalPositions[i * 9 + v * 3 + 0] = posAttr.getX(idx);
+            finalPositions[i * 9 + v * 3 + 1] = posAttr.getY(idx);
+            finalPositions[i * 9 + v * 3 + 2] = posAttr.getZ(idx);
         }
     });
 
@@ -209,13 +211,14 @@ export function estimateSelectionCircumference(
     if (faceIndices.length === 0) return 0;
 
     const posAttr = geometry.attributes.position;
+    const index = geometry.index;
     const box = new THREE.Box3();
     const centroid = new THREE.Vector3();
     let pointCount = 0;
 
     for (const faceIdx of faceIndices) {
         for (let v = 0; v < 3; v++) {
-            const idx = faceIdx * 3 + v;
+            const idx = index ? index.getX(faceIdx * 3 + v) : faceIdx * 3 + v;
             const x = posAttr.getX(idx);
             const y = posAttr.getY(idx);
             const z = posAttr.getZ(idx);
@@ -235,7 +238,7 @@ export function estimateSelectionCircumference(
     if (size.z > size.x && size.z > size.y) {
         for (const faceIdx of faceIndices) {
             for (let v = 0; v < 3; v++) {
-                const idx = faceIdx * 3 + v;
+                const idx = index ? index.getX(faceIdx * 3 + v) : faceIdx * 3 + v;
                 const dx = posAttr.getX(idx) - centroid.x;
                 const dy = posAttr.getY(idx) - centroid.y;
                 radiusSum += Math.sqrt(dx * dx + dy * dy);
@@ -244,7 +247,7 @@ export function estimateSelectionCircumference(
     } else if (size.y > size.x && size.y > size.z) {
         for (const faceIdx of faceIndices) {
             for (let v = 0; v < 3; v++) {
-                const idx = faceIdx * 3 + v;
+                const idx = index ? index.getX(faceIdx * 3 + v) : faceIdx * 3 + v;
                 const dx = posAttr.getX(idx) - centroid.x;
                 const dz = posAttr.getZ(idx) - centroid.z;
                 radiusSum += Math.sqrt(dx * dx + dz * dz);
@@ -253,7 +256,7 @@ export function estimateSelectionCircumference(
     } else {
         for (const faceIdx of faceIndices) {
             for (let v = 0; v < 3; v++) {
-                const idx = faceIdx * 3 + v;
+                const idx = index ? index.getX(faceIdx * 3 + v) : faceIdx * 3 + v;
                 const dy = posAttr.getY(idx) - centroid.y;
                 const dz = posAttr.getZ(idx) - centroid.z;
                 radiusSum += Math.sqrt(dy * dy + dz * dz);
@@ -278,15 +281,18 @@ export function getContiguousIslands(
     if (faceIndices.length === 0) return [];
 
     const posAttr = geometry.attributes.position;
+    const index = geometry.index;
     const vertexToFaces = new Map<string, number[]>();
 
     // Pre-calculate normals for all selected faces for efficient angle comparison
     const faceNormals = new Map<number, THREE.Vector3>();
     for (const fIdx of faceIndices) {
-        const off = fIdx * 3;
-        const vA = new THREE.Vector3().fromBufferAttribute(posAttr, off);
-        const vB = new THREE.Vector3().fromBufferAttribute(posAttr, off + 1);
-        const vC = new THREE.Vector3().fromBufferAttribute(posAttr, off + 2);
+        const i0 = index ? index.getX(fIdx * 3 + 0) : fIdx * 3 + 0;
+        const i1 = index ? index.getX(fIdx * 3 + 1) : fIdx * 3 + 1;
+        const i2 = index ? index.getX(fIdx * 3 + 2) : fIdx * 3 + 2;
+        const vA = new THREE.Vector3().fromBufferAttribute(posAttr, i0);
+        const vB = new THREE.Vector3().fromBufferAttribute(posAttr, i1);
+        const vC = new THREE.Vector3().fromBufferAttribute(posAttr, i2);
         const normal = new THREE.Vector3()
             .crossVectors(new THREE.Vector3().subVectors(vB, vA), new THREE.Vector3().subVectors(vC, vA))
             .normalize();
@@ -297,17 +303,21 @@ export function getContiguousIslands(
 
     // Key function for vertices to handle slight floating point issues
     const getVKey = (fIdx: number, vIdxInFace: number) => {
-        const off = fIdx * 3 + vIdxInFace;
-        return `${Math.round(posAttr.getX(off) * 10000)},${Math.round(posAttr.getY(off) * 10000)},${Math.round(posAttr.getZ(off) * 10000)}`;
+        const idx = index ? index.getX(fIdx * 3 + vIdxInFace) : fIdx * 3 + vIdxInFace;
+        return `${Math.round(posAttr.getX(idx) * 10000)},${Math.round(posAttr.getY(idx) * 10000)},${Math.round(posAttr.getZ(idx) * 10000)}`;
     };
 
     // Build vertex-to-face adjacency (only for the selected faces)
+    const faceToVKeys = new Map<number, string[]>();
     for (const fIdx of faceIndices) {
+        const keys = [];
         for (let v = 0; v < 3; v++) {
             const key = getVKey(fIdx, v);
+            keys.push(key);
             if (!vertexToFaces.has(key)) vertexToFaces.set(key, []);
             vertexToFaces.get(key)!.push(fIdx);
         }
+        faceToVKeys.set(fIdx, keys);
     }
 
     const visited = new Set<number>();
@@ -326,8 +336,8 @@ export function getContiguousIslands(
             const currentNormal = faceNormals.get(current)!;
 
             // Check all 3 vertices of current face for adjacent selected faces
-            for (let v = 0; v < 3; v++) {
-                const key = getVKey(current, v);
+            const keys = faceToVKeys.get(current) || [];
+            for (const key of keys) {
                 const candidates = vertexToFaces.get(key) || [];
                 for (const adj of candidates) {
                     if (!visited.has(adj)) {
@@ -357,15 +367,18 @@ export function fitCylinderToSelection(
 ): CylinderFit | null {
     if (faceIndices.length === 0) return null;
     const posAttr = geometry.attributes.position;
+    const index = geometry.index;
     const points: THREE.Vector3[] = [];
     const normals: THREE.Vector3[] = [];
     const centroids: THREE.Vector3[] = [];
 
     for (const fIdx of faceIndices) {
-        const off = fIdx * 3;
-        const vA = new THREE.Vector3().fromBufferAttribute(posAttr, off + 0);
-        const vB = new THREE.Vector3().fromBufferAttribute(posAttr, off + 1);
-        const vC = new THREE.Vector3().fromBufferAttribute(posAttr, off + 2);
+        const i0 = index ? index.getX(fIdx * 3 + 0) : fIdx * 3 + 0;
+        const i1 = index ? index.getX(fIdx * 3 + 1) : fIdx * 3 + 1;
+        const i2 = index ? index.getX(fIdx * 3 + 2) : fIdx * 3 + 2;
+        const vA = new THREE.Vector3().fromBufferAttribute(posAttr, i0);
+        const vB = new THREE.Vector3().fromBufferAttribute(posAttr, i1);
+        const vC = new THREE.Vector3().fromBufferAttribute(posAttr, i2);
         const center = new THREE.Vector3().add(vA).add(vB).add(vC).divideScalar(3);
         const n = new THREE.Vector3().crossVectors(new THREE.Vector3().subVectors(vB, vA), new THREE.Vector3().subVectors(vC, vA)).normalize();
         points.push(vA, vB, vC); normals.push(n); centroids.push(center);
@@ -441,13 +454,16 @@ export function analyzeMesh(geometry: THREE.BufferGeometry): {
     openEdges: number;
     nonManifoldEdges: number;
     avgEdgeLength: number;
-    /** Flat Float32Array of line segment positions [x1,y1,z1, x2,y2,z2, ...] for boundary edge visualization */
-    boundaryEdgePositions: Float32Array;
+    /** Flat Float32Array of line segment positions [x1,y1,z1, x2,y2,z2, ...] for open boundary edges */
+    openEdgePositions: Float32Array;
+    /** Flat Float32Array for edges shared by >2 faces */
+    nonManifoldEdgePositions: Float32Array;
 } {
     const posAttr = geometry.attributes.position;
-    const prec = 10000;
+    const index = geometry.index;
+    const PREC = 1e5;
     const vKey = (idx: number) =>
-        `${Math.round(posAttr.getX(idx) * prec)},${Math.round(posAttr.getY(idx) * prec)},${Math.round(posAttr.getZ(idx) * prec)}`;
+        `${Math.round(posAttr.getX(idx) * PREC)},${Math.round(posAttr.getY(idx) * PREC)},${Math.round(posAttr.getZ(idx) * PREC)}`;
 
     // Map: edge key → { count, positions of the two endpoints }
     const edgeData = new Map<string, { count: number; ax: number; ay: number; az: number; bx: number; by: number; bz: number }>();
@@ -455,11 +471,18 @@ export function analyzeMesh(geometry: THREE.BufferGeometry): {
     let totalEdgeLen = 0;
     let edgeCount = 0;
 
-    for (let fIdx = 0; fIdx < posAttr.count / 3; fIdx++) {
-        const off = fIdx * 3;
-        const k0 = vKey(off), k1 = vKey(off + 1), k2 = vKey(off + 2);
+    const faceCount = index ? index.count / 3 : posAttr.count / 3;
+
+    for (let fIdx = 0; fIdx < faceCount; fIdx++) {
+        const i0 = index ? index.getX(fIdx * 3 + 0) : fIdx * 3 + 0;
+        const i1 = index ? index.getX(fIdx * 3 + 1) : fIdx * 3 + 1;
+        const i2 = index ? index.getX(fIdx * 3 + 2) : fIdx * 3 + 2;
+
+        const k0 = vKey(i0), k1 = vKey(i1), k2 = vKey(i2);
 
         const processEdge = (keyA: string, keyB: string, idxA: number, idxB: number) => {
+            if (keyA === keyB) return; // Skip degenerate edges (they don't contribute to manifoldness)
+
             const key = keyA < keyB ? `${keyA}:${keyB}` : `${keyB}:${keyA}`;
             const existing = edgeData.get(key);
             if (existing) {
@@ -480,30 +503,30 @@ export function analyzeMesh(geometry: THREE.BufferGeometry): {
             edgeCount++;
         };
 
-        processEdge(k0, k1, off, off + 1);
-        processEdge(k1, k2, off + 1, off + 2);
-        processEdge(k2, k0, off + 2, off);
+        processEdge(k0, k1, i0, i1);
+        processEdge(k1, k2, i1, i2);
+        processEdge(k2, k0, i2, i0);
     }
 
     let openEdges = 0;
     let nonManifoldEdges = 0;
-    const boundarySegments: number[] = [];
+    const openSegments: number[] = [];
+    const nonManifoldSegments: number[] = [];
 
     for (const data of edgeData.values()) {
         if (data.count === 1) {
             openEdges++;
-            // Add line segment for this boundary edge
-            boundarySegments.push(data.ax, data.ay, data.az, data.bx, data.by, data.bz);
+            openSegments.push(data.ax, data.ay, data.az, data.bx, data.by, data.bz);
         }
         if (data.count > 2) {
             nonManifoldEdges++;
-            // Also highlight non-manifold edges
-            boundarySegments.push(data.ax, data.ay, data.az, data.bx, data.by, data.bz);
+            nonManifoldSegments.push(data.ax, data.ay, data.az, data.bx, data.by, data.bz);
         }
     }
 
     const avgEdgeLength = edgeCount > 0 ? totalEdgeLen / edgeCount : 1;
-    const boundaryEdgePositions = new Float32Array(boundarySegments);
+    const openEdgePositions = new Float32Array(openSegments);
+    const nonManifoldEdgePositions = new Float32Array(nonManifoldSegments);
 
-    return { openEdges, nonManifoldEdges, avgEdgeLength, boundaryEdgePositions };
+    return { openEdges, nonManifoldEdges, avgEdgeLength, openEdgePositions, nonManifoldEdgePositions };
 }

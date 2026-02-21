@@ -1,4 +1,5 @@
 import React, { useRef } from 'react';
+import { Tooltip } from '../UI/Tooltip';
 import { useStore } from '../../store/useStore';
 import { Trash2, Upload, Download, MousePointerClick, Scissors, Grid3X3, Diamond, Hexagon, Minimize2, Waves } from 'lucide-react';
 import { exportSceneToSTL } from '../../utils/exportUtils';
@@ -60,6 +61,7 @@ export const Toolbar: React.FC = () => {
         event.target.value = '';
     };
 
+
     const ToolButton = ({
         active,
         onClick,
@@ -75,26 +77,27 @@ export const Toolbar: React.FC = () => {
         small?: boolean;
         title?: string
     }) => (
-        <button
-            onClick={onClick}
-            title={title}
-            style={{
-                width: small ? (isMobile ? '30px' : '32px') : (isMobile ? '36px' : '40px'),
-                height: small ? (isMobile ? '30px' : '32px') : (isMobile ? '36px' : '40px'),
-                borderRadius: 'var(--radius-md)',
-                backgroundColor: primary ? 'var(--accent-primary)' : (active ? 'var(--bg-hover)' : 'transparent'),
-                color: primary ? '#fff' : (active ? 'var(--accent-primary)' : 'var(--text-secondary)'),
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                marginBottom: isMobile ? '0' : (small ? '4px' : '8px'),
-                marginRight: isMobile ? (small ? '4px' : '8px') : '0',
-                transition: 'all 0.2s ease',
-                border: active && !primary ? '1px solid var(--accent-primary)' : '1px solid transparent',
-            }}
-        >
-            <Icon size={small ? (isMobile ? 14 : 16) : (isMobile ? 18 : 20)} />
-        </button>
+        <Tooltip content={title} icon={<Icon size={14} />} align={isMobile ? 'center' : 'right'}>
+            <button
+                onClick={onClick}
+                style={{
+                    width: small ? (isMobile ? '30px' : '32px') : (isMobile ? '36px' : '40px'),
+                    height: small ? (isMobile ? '30px' : '32px') : (isMobile ? '36px' : '40px'),
+                    borderRadius: 'var(--radius-md)',
+                    backgroundColor: primary ? 'var(--accent-primary)' : (active ? 'var(--bg-hover)' : 'transparent'),
+                    color: primary ? '#fff' : (active ? 'var(--accent-primary)' : 'var(--text-secondary)'),
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    marginBottom: isMobile ? '0' : (small ? '4px' : '8px'),
+                    marginRight: isMobile ? (small ? '4px' : '8px') : '0',
+                    transition: 'all 0.2s ease',
+                    border: active && !primary ? '1px solid var(--accent-primary)' : '1px solid transparent',
+                }}
+            >
+                <Icon size={small ? (isMobile ? 14 : 16) : (isMobile ? 18 : 20)} />
+            </button>
+        </Tooltip>
     );
 
     return (
@@ -207,7 +210,19 @@ export const Toolbar: React.FC = () => {
                 active={transformMode === 'stitching'}
                 icon={Waves}
                 title="Stitching Repair"
-                onClick={() => setTransformMode('stitching')}
+                onClick={() => {
+                    setTransformMode('stitching');
+                    // Automatically select all faces of all models for repair analysis
+                    models.forEach(m => {
+                        const count = m.bufferGeometry.attributes.position.count / 3;
+                        const allIndices = Array.from({ length: count }, (_, i) => i);
+                        useStore.getState().setSmartSelection(m.id, allIndices);
+                    });
+                    // Select the first model as active if none selected
+                    if (!selectedId && models.length > 0) {
+                        useStore.getState().selectModel(models[0].id);
+                    }
+                }}
             />
 
             {!isMobile && <div style={{ height: '10px', marginTop: 'auto' }} />}

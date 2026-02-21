@@ -61,28 +61,305 @@ function computeAvgEdgeLength(mesh: IndexedMesh): number {
 // ─── Pipeline stages ─────────────────────────────────────────────────
 
 /**
- * Build indexed mesh from flat position array, welding coincident vertices.
+ * Build indexed mesh from a BufferGeometry, respecting its index if it exists.
+ * Welds coincident vertices into a unified topological structure.
  */
-function buildIndexedMesh(positions: ArrayLike<number>): IndexedMesh {
+function buildIndexedMesh(geometry: THREE.BufferGeometry): IndexedMesh {
+    const posAttr = geometry.attributes.position;
+    const index = geometry.index;
     const PREC = 1e5;
     const vertexMap = new Map<string, number>();
     const vertices: number[] = [];
     const faces: number[] = [];
     let vertCount = 0;
 
-    const numVerts = positions.length / 3;
-    for (let i = 0; i < numVerts; i++) {
-        const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
-        const key = `${Math.round(x * PREC)},${Math.round(y * PREC)},${Math.round(z * PREC)}`;
+    const getVertIdx = (vIdx: number) => {
+        const x = posAttr.getX(vIdx);
+        const y = posAttr.getY(vIdx);
+        const z = posAttr.getZ(vIdx);
+
+        // Coalesce NaNs/Infs to zero to prevent downstream geometric failures
+        const safeX = Number.isFinite(x) ? x : 0;
+        const safeY = Number.isFinite(y) ? y : 0;
+        const safeZ = Number.isFinite(z) ? z : 0;
+
+        const key = `${Math.round(safeX * PREC)},${Math.round(safeY * PREC)},${Math.round(safeZ * PREC)}`;
         let idx = vertexMap.get(key);
         if (idx === undefined) {
             idx = vertCount++;
             vertexMap.set(key, idx);
-            vertices.push(x, y, z);
+            vertices.push(safeX, safeY, safeZ);
         }
-        faces.push(idx);
+        return idx;
+    };
+
+    if (index) {
+        for (let i = 0; i < index.count; i++) {
+            faces.push(getVertIdx(index.getX(i)));
+        }
+    } else {
+        for (let i = 0; i < posAttr.count; i++) {
+            faces.push(getVertIdx(i));
+        }
     }
+
     return { vertices, faces };
+}
+
+/**
+ * Resolves T-Junctions purely topologically by splitting large triangles that have 
+ * multiple smaller boundary vertices lying collinearly along their open edge.
+ * This natively stitches non-conformal mesh boundaries like knurl edges against flat caps.
+ */
+function resolveTJunctions(mesh: IndexedMesh): number {
+    let splits = 0;
+    let changed = true;
+    let safety = 0;
+
+    while (changed && safety < 100) {
+        changed = false;
+        safety++;
+
+        const edgeFaceCount = new Map<string, number>();
+        for (let fi = 0; fi < mesh.faces.length / 3; fi++) {
+            const v0 = mesh.faces[fi * 3], v1 = mesh.faces[fi * 3 + 1], v2 = mesh.faces[fi * 3 + 2];
+            for (const [a, b] of [[v0, v1], [v1, v2], [v2, v0]]) {
+                const key = edgeKey(a, b);
+                edgeFaceCount.set(key, (edgeFaceCount.get(key) || 0) + 1);
+            }
+        }
+
+        const boundaryEdges: { u: number, v: number, faceIdx: number, opp: number }[] = [];
+        for (let fi = 0; fi < mesh.faces.length / 3; fi++) {
+            const v0 = mesh.faces[fi * 3], v1 = mesh.faces[fi * 3 + 1], v2 = mesh.faces[fi * 3 + 2];
+            const edges = [[v0, v1, v2], [v1, v2, v0], [v2, v0, v1]];
+            for (const [u, v, opp] of edges) {
+                if (edgeFaceCount.get(edgeKey(u, v)) === 1) {
+                    boundaryEdges.push({ u, v, faceIdx: fi, opp });
+                }
+            }
+        }
+
+        const bVerts = new Set<number>();
+        for (const e of boundaryEdges) {
+            bVerts.add(e.u);
+            bVerts.add(e.v);
+        }
+        const bVertsArr = Array.from(bVerts);
+
+        const grid = new Map<string, number[]>();
+        const gridSize = 2.0;
+        for (const p of bVertsArr) {
+            const gx = Math.floor(mesh.vertices[p * 3] / gridSize);
+            const gy = Math.floor(mesh.vertices[p * 3 + 1] / gridSize);
+            const gz = Math.floor(mesh.vertices[p * 3 + 2] / gridSize);
+            const key = `${gx},${gy},${gz}`;
+            if (!grid.has(key)) grid.set(key, []);
+            grid.get(key)!.push(p);
+        }
+
+        const modifiedFaces = new Set<number>();
+
+        for (const e of boundaryEdges) {
+            if (modifiedFaces.has(e.faceIdx)) continue;
+
+            const ux = mesh.vertices[e.u * 3], uy = mesh.vertices[e.u * 3 + 1], uz = mesh.vertices[e.u * 3 + 2];
+            const vx = mesh.vertices[e.v * 3], vy = mesh.vertices[e.v * 3 + 1], vz = mesh.vertices[e.v * 3 + 2];
+
+            const minX = Math.min(ux, vx) - 0.01, maxX = Math.max(ux, vx) + 0.01;
+            const minY = Math.min(uy, vy) - 0.01, maxY = Math.max(uy, vy) + 0.01;
+            const minZ = Math.min(uz, vz) - 0.01, maxZ = Math.max(uz, vz) + 0.01;
+
+            const uvx = vx - ux, uvy = vy - uy, uvz = vz - uz;
+            const edgeLenSq = uvx * uvx + uvy * uvy + uvz * uvz;
+            if (edgeLenSq < 1e-8) continue;
+
+            let bestVert = -1;
+            let bestT = 1;
+
+            // Spatial query
+            const gsx = Math.floor(minX / gridSize), gex = Math.floor(maxX / gridSize);
+            const gsy = Math.floor(minY / gridSize), gey = Math.floor(maxY / gridSize);
+            const gsz = Math.floor(minZ / gridSize), gez = Math.floor(maxZ / gridSize);
+
+            for (let gx = gsx; gx <= gex; gx++) {
+                for (let gy = gsy; gy <= gey; gy++) {
+                    for (let gz = gsz; gz <= gez; gz++) {
+                        const candidates = grid.get(`${gx},${gy},${gz}`);
+                        if (!candidates) continue;
+
+                        for (const p of candidates) {
+                            if (p === e.u || p === e.v || p === e.opp) continue;
+
+                            const px = mesh.vertices[p * 3], py = mesh.vertices[p * 3 + 1], pz = mesh.vertices[p * 3 + 2];
+                            if (px < minX || px > maxX || py < minY || py > maxY || pz < minZ || pz > maxZ) continue;
+
+                            const upx = px - ux, upy = py - uy, upz = pz - uz;
+                            const t = (upx * uvx + upy * uvy + upz * uvz) / edgeLenSq;
+
+                            if (t > 1e-4 && t < 1 - 1e-4) {
+                                const projX = ux + t * uvx, projY = uy + t * uvy, projZ = uz + t * uvz;
+                                const distSq = (px - projX) ** 2 + (py - projY) ** 2 + (pz - projZ) ** 2;
+                                if (distSq < 1e-6 && t < bestT) {
+                                    bestT = t;
+                                    bestVert = p;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (bestVert !== -1) {
+                mesh.faces[e.faceIdx * 3 + 0] = e.u;
+                mesh.faces[e.faceIdx * 3 + 1] = bestVert;
+                mesh.faces[e.faceIdx * 3 + 2] = e.opp;
+                mesh.faces.push(bestVert, e.v, e.opp);
+                modifiedFaces.add(e.faceIdx);
+                splits++;
+                changed = true;
+            }
+        }
+    }
+    return splits;
+}
+
+/**
+ * Iteratively removes "flaps": faces that have at least one boundary edge (count=1)
+ * AND at least one non-manifold edge (count > 2).
+ * These are typically zero-volume walls or spikes extending off the main mesh.
+ */
+function peelLooseFlaps(mesh: IndexedMesh): number {
+    let totalRemoved = 0;
+    let changed = true;
+    let passCount = 0;
+    const MAX_PASSES = 20; // Reduced from 100 to prevent hang on complex failures
+
+    while (changed && passCount < MAX_PASSES) {
+        changed = false;
+        passCount++;
+        const edgeCount = new Map<string, number>();
+        for (let i = 0; i < mesh.faces.length; i += 3) {
+            for (const [a, b] of [[mesh.faces[i], mesh.faces[i + 1]], [mesh.faces[i + 1], mesh.faces[i + 2]], [mesh.faces[i + 2], mesh.faces[i]]]) {
+                const k = edgeKey(a, b);
+                edgeCount.set(k, (edgeCount.get(k) || 0) + 1);
+            }
+        }
+
+        const clean: number[] = [];
+        let removedThisPass = 0;
+        for (let i = 0; i < mesh.faces.length; i += 3) {
+            const keys = [
+                edgeKey(mesh.faces[i], mesh.faces[i + 1]),
+                edgeKey(mesh.faces[i + 1], mesh.faces[i + 2]),
+                edgeKey(mesh.faces[i + 2], mesh.faces[i])
+            ];
+
+            const counts = keys.map(k => edgeCount.get(k)!);
+            const hasBoundary = counts.some(c => c === 1);
+            const hasNonManifold = counts.some(c => c > 2);
+            const isIsolated = counts.every(c => c === 1);
+
+            if ((hasBoundary && hasNonManifold) || isIsolated) {
+                removedThisPass++;
+            } else {
+                clean.push(mesh.faces[i], mesh.faces[i + 1], mesh.faces[i + 2]);
+            }
+        }
+
+        if (removedThisPass > 0) {
+            mesh.faces = clean;
+            totalRemoved += removedThisPass;
+            changed = true;
+        }
+    }
+    return totalRemoved;
+}
+
+/**
+ * Trims un-closeable open boundaries (orange edges that hit dead ends).
+ * If a boundary path cannot form a closed loop, the triangles touching it are eroded
+ * iteratively until the crack merges into a valid manifold hole or disappears.
+ */
+function removeUnloopableBoundaries(mesh: IndexedMesh): number {
+    let totalRemoved = 0;
+    let changed = true;
+    let passCount = 0;
+    const MAX_PASSES = 20; // Hard fail-safe to prevent infinite topological oscillation
+
+    while (changed && passCount < MAX_PASSES) {
+        changed = false;
+        passCount++;
+        const { boundaryCount, adj } = findBoundaryEdges(mesh);
+        if (boundaryCount === 0) break;
+
+        const visitedEdges = new Set<string>();
+        const badEdges = new Set<string>();
+
+        for (const startNode of adj.keys()) {
+            const neighbors = adj.get(startNode);
+            if (!neighbors) continue;
+
+            for (const nextNode of neighbors) {
+                const startEdgeKey = `${startNode}_${nextNode}`;
+                if (visitedEdges.has(startEdgeKey)) continue;
+
+                const path: string[] = [];
+                let curr = startNode;
+                let next = nextNode;
+                let stuck = false;
+
+                while (true) {
+                    const edgeKey = `${curr}_${next}`;
+                    path.push(edgeKey);
+                    visitedEdges.add(edgeKey);
+
+                    if (next === startNode) break; // closed loop
+                    if (path.length > 50000) { stuck = true; break; }
+
+                    const nexts = adj.get(next);
+                    if (!nexts) { stuck = true; break; } // dead end
+
+                    let foundNext = -1;
+                    for (const candidate of nexts) {
+                        if (!visitedEdges.has(`${next}_${candidate}`)) {
+                            foundNext = candidate;
+                            break;
+                        }
+                    }
+                    if (foundNext === -1) { stuck = true; break; }
+
+                    curr = next;
+                    next = foundNext;
+                }
+
+                if (stuck || path.length < 3) {
+                    for (const ek of path) badEdges.add(ek);
+                }
+            }
+        }
+
+        if (badEdges.size > 0) {
+            const clean: number[] = [];
+            let removedPass = 0;
+            for (let i = 0; i < mesh.faces.length; i += 3) {
+                const a = mesh.faces[i], b = mesh.faces[i + 1], c = mesh.faces[i + 2];
+                if (
+                    badEdges.has(`${a}_${b}`) || badEdges.has(`${b}_${a}`) ||
+                    badEdges.has(`${b}_${c}`) || badEdges.has(`${c}_${b}`) ||
+                    badEdges.has(`${c}_${a}`) || badEdges.has(`${a}_${c}`)
+                ) {
+                    removedPass++;
+                    changed = true;
+                } else {
+                    clean.push(a, b, c);
+                }
+            }
+            mesh.faces = clean;
+            totalRemoved += removedPass;
+        }
+    }
+    return totalRemoved;
 }
 
 /**
@@ -160,7 +437,7 @@ function findBoundaryEdges(mesh: IndexedMesh): {
  * Trace boundary loops from the adjacency map.
  * Each loop is a list of vertex indices forming a closed polygon (the hole boundary).
  */
-function traceBoundaryLoops(adj: Map<number, number[]>, maxEdges: number = 2000): number[][] {
+function traceBoundaryLoops(adj: Map<number, number[]>, maxEdges: number = 50000): number[][] {
     const visitedEdges = new Set<string>();
     const loops: number[][] = [];
 
@@ -772,9 +1049,9 @@ export interface HoleAnalysis {
 export function analyzeRepairableHoles(geometry: THREE.BufferGeometry): {
     avgEdgeLength: number;
     holes: HoleAnalysis[];
+    rawBoundaries: Float32Array;
 } {
-    const positions = geometry.attributes.position.array;
-    const mesh = buildIndexedMesh(positions);
+    const mesh = buildIndexedMesh(geometry);
     removeDegenerateFaces(mesh);
 
     const { adj } = findBoundaryEdges(mesh);
@@ -805,7 +1082,18 @@ export function analyzeRepairableHoles(geometry: THREE.BufferGeometry): {
         };
     });
 
-    return { avgEdgeLength, holes };
+    // Collect all raw edges that are boundaries
+    const rawSegments: number[] = [];
+    for (const [u, list] of adj.entries()) {
+        for (const v of list) {
+            rawSegments.push(
+                mesh.vertices[u * 3 + 0], mesh.vertices[u * 3 + 1], mesh.vertices[u * 3 + 2],
+                mesh.vertices[v * 3 + 0], mesh.vertices[v * 3 + 1], mesh.vertices[v * 3 + 2]
+            );
+        }
+    }
+
+    return { avgEdgeLength, holes, rawBoundaries: new Float32Array(rawSegments) };
 }
 
 export async function repairWithManifold(
@@ -817,14 +1105,13 @@ export async function repairWithManifold(
         holeDiameterMultiplier = 10,
     } = options;
 
-    const positions = geometry.attributes.position.array;
-    const inputTriCount = positions.length / 9;
+    const inputTriCount = geometry.index ? geometry.index.count / 3 : geometry.attributes.position.count / 3;
 
     console.log(`[MeshRepair] === Starting conservative repair: ${inputTriCount} triangles ===`);
     console.log(`[MeshRepair] Options: edgeMultiplier=${edgeMultiplier}, holeDiameterMultiplier=${holeDiameterMultiplier}`);
 
     // Step 1: Build indexed mesh (weld coincident vertices)
-    const mesh = buildIndexedMesh(positions);
+    const mesh = buildIndexedMesh(geometry);
     const origFaceCount = mesh.faces.length / 3;
 
     // Step 2: Remove only truly degenerate faces (same vertex indices)
@@ -832,6 +1119,19 @@ export async function repairWithManifold(
     if (degRemoved > 0) {
         console.log(`[MeshRepair] Removed ${degRemoved} degenerate faces`);
     }
+
+    // Step 2.5: Topologically resolve T-junctions
+    const tSplits = resolveTJunctions(mesh);
+    if (tSplits > 0) {
+        console.log(`[MeshRepair] Resolved ${tSplits} T-junction instances (split boundary faces).`);
+    }
+
+    // Step 2.6: Peel non-manifold flaps and unloopable boundaries
+    const flapsRemoved = peelLooseFlaps(mesh);
+    if (flapsRemoved > 0) console.log(`[MeshRepair] Peeled ${flapsRemoved} non-manifold loose flaps.`);
+
+    const unloopableRemoved = removeUnloopableBoundaries(mesh);
+    if (unloopableRemoved > 0) console.log(`[MeshRepair] Eroded ${unloopableRemoved} triangles along un-closeable open cracks.`);
 
     // Step 3: Find boundary edges (gaps in the mesh)
     const { boundaryCount, adj } = findBoundaryEdges(mesh);
@@ -854,7 +1154,8 @@ export async function repairWithManifold(
     console.log(`[MeshRepair] Avg edge length: ${avgEdge.toFixed(4)}, max fill tri: ${maxTriSize.toFixed(4)}, max hole diameter: ${maxHoleDiameter.toFixed(4)}`);
 
     // Step 6: Process Annular Gaps (Rings) First
-    const { remainingLoops, totalFacesAdded: bridgedFaces } = detectAndBridgeAnnularGaps(mesh, loops, maxHoleDiameter);
+    const annularGapThreshold = avgEdge * 3;
+    const { remainingLoops, totalFacesAdded: bridgedFaces } = detectAndBridgeAnnularGaps(mesh, loops, annularGapThreshold);
     let totalFilled = bridgedFaces;
     let holesSkipped = 0;
 

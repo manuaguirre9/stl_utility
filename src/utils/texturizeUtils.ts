@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { getContiguousIslands, subdivideTriangles, fitCylinderToSelection } from './meshUtils';
-import { repairGeometry } from './meshRepairService';
+import { repairWithManifold } from './manifoldRepairService';
 
 export type KnurlPattern = 'diamond' | 'straight' | 'diagonal' | 'square';
 
@@ -80,18 +80,23 @@ function distSq(x1: number, y1: number, z1: number, x2: number, y2: number, z2: 
  */
 function getBoundarySegments(geometry: THREE.BufferGeometry, faceIndices: number[]): { a: THREE.Vector3, b: THREE.Vector3, lenSq: number, ab: THREE.Vector3 }[] {
     const posAttr = geometry.attributes.position;
-    const prec = 10000;
-    const vKey = (idx: number) => `${Math.round(posAttr.getX(idx) * prec)},${Math.round(posAttr.getY(idx) * prec)},${Math.round(posAttr.getZ(idx) * prec)}`;
+    const PREC = 1e5;
+    const vKey = (idx: number) => `${Math.round(posAttr.getX(idx) * PREC)},${Math.round(posAttr.getY(idx) * PREC)},${Math.round(posAttr.getZ(idx) * PREC)}`;
 
     const edgeMap = new Map<string, { a: THREE.Vector3, b: THREE.Vector3, count: number }>();
 
-    faceIndices.forEach(fIdx => {
-        const off = fIdx * 3;
-        const v0 = new THREE.Vector3(posAttr.getX(off), posAttr.getY(off), posAttr.getZ(off));
-        const v1 = new THREE.Vector3(posAttr.getX(off + 1), posAttr.getY(off + 1), posAttr.getZ(off + 1));
-        const v2 = new THREE.Vector3(posAttr.getX(off + 2), posAttr.getY(off + 2), posAttr.getZ(off + 2));
+    const index = geometry.index;
 
-        const k0 = vKey(off), k1 = vKey(off + 1), k2 = vKey(off + 2);
+    faceIndices.forEach(fIdx => {
+        const i0 = index ? index.getX(fIdx * 3 + 0) : fIdx * 3 + 0;
+        const i1 = index ? index.getX(fIdx * 3 + 1) : fIdx * 3 + 1;
+        const i2 = index ? index.getX(fIdx * 3 + 2) : fIdx * 3 + 2;
+
+        const v0 = new THREE.Vector3(posAttr.getX(i0), posAttr.getY(i0), posAttr.getZ(i0));
+        const v1 = new THREE.Vector3(posAttr.getX(i1), posAttr.getY(i1), posAttr.getZ(i1));
+        const v2 = new THREE.Vector3(posAttr.getX(i2), posAttr.getY(i2), posAttr.getZ(i2));
+
+        const k0 = vKey(i0), k1 = vKey(i1), k2 = vKey(i2);
 
         const processEdge = (keyA: string, keyB: string, vecA: THREE.Vector3, vecB: THREE.Vector3) => {
             const key = keyA < keyB ? `${keyA}:${keyB}` : `${keyB}:${keyA}`;
@@ -116,18 +121,103 @@ function getBoundarySegments(geometry: THREE.BufferGeometry, faceIndices: number
     return segments;
 }
 
-function isOnAnySegment(p: THREE.Vector3, segments: { a: THREE.Vector3, b: THREE.Vector3, lenSq: number, ab: THREE.Vector3 }[], eps: number = 1e-2): boolean {
+// --------------------------------------------------------------------------------
+// SPATIAL HASH GRID FOR PERFORMANCE OPTIMIZATION
+// --------------------------------------------------------------------------------
+// Problem: Checking if a point is on a boundary (isOnAnySegment) scales as O(N) where N is the number of boundary segments.
+// When generating textures, we test millions of points against thousands of boundary segments. This O(P * N) complexity
+// would freeze the browser for minutes.
+// Solution: We partition the 3D space into a grid of cells (Spatial Hashing).
+// Each cell stores only the boundary segments that pass through it.
+// Finding if a point is on a boundary becomes an O(1) operation: we just look up the cell the point is in and check
+// only the few segments (if any) inside that specific cell.
+
+interface BoundaryGrid {
+    cellSize: number;
+    cells: Map<string, { a: THREE.Vector3, b: THREE.Vector3, lenSq: number, ab: THREE.Vector3 }[]>;
+}
+
+/**
+ * Creates a Spatial Hash Grid from a list of boundary segments.
+ * @param segments The list of boundary segments extracted from the original mesh selection.
+ * @param cellSize The size of each 3D cubic cell. 2.0mm is a good default for 3D printing tasks.
+ */
+function createBoundaryGrid(segments: { a: THREE.Vector3, b: THREE.Vector3, lenSq: number, ab: THREE.Vector3 }[], cellSize: number = 2.0): BoundaryGrid {
+    const grid: BoundaryGrid = { cellSize, cells: new Map() };
+    for (const seg of segments) {
+        // Find the bounding box of the segment, expanded by a tiny buffer
+        const minX = Math.min(seg.a.x, seg.b.x) - 0.1;
+        const maxX = Math.max(seg.a.x, seg.b.x) + 0.1;
+        const minY = Math.min(seg.a.y, seg.b.y) - 0.1;
+        const maxY = Math.max(seg.a.y, seg.b.y) + 0.1;
+        const minZ = Math.min(seg.a.z, seg.b.z) - 0.1;
+        const maxZ = Math.max(seg.a.z, seg.b.z) + 0.1;
+
+        // Convert the continuous 3D bounding box into integer grid coordinates
+        const startX = Math.floor(minX / cellSize);
+        const endX = Math.floor(maxX / cellSize);
+        const startY = Math.floor(minY / cellSize);
+        const endY = Math.floor(maxY / cellSize);
+        const startZ = Math.floor(minZ / cellSize);
+        const endZ = Math.floor(maxZ / cellSize);
+
+        // Register the segment in every cell it touches
+        for (let x = startX; x <= endX; x++) {
+            for (let y = startY; y <= endY; y++) {
+                for (let z = startZ; z <= endZ; z++) {
+                    const key = `${x},${y},${z}`;
+                    if (!grid.cells.has(key)) grid.cells.set(key, []);
+                    grid.cells.get(key)!.push(seg);
+                }
+            }
+        }
+    }
+    return grid;
+}
+
+const _ap = new THREE.Vector3(); // Reused vector to avoid garbage collection pressure in tight loops
+
+/**
+ * Checks if a given 3D point `p` lies on ANY of the segments stored in the Spatial Hash Grid.
+ * @param p The 3D point to test (usually a midpoint of an outer polygon edge).
+ * @param grid The pre-computed Spatial Hash Grid.
+ * @param eps Tolerance (in mm) for floating point inaccuracies. Default 1e-2. 1e-4 used for stricter exact matching.
+ */
+function isOnAnySegmentGrid(p: THREE.Vector3, grid: BoundaryGrid, eps: number = 1e-2): boolean {
+    const { cellSize, cells } = grid;
+
+    // 1. Locate the exact grid cell the point falls into
+    const x = Math.floor(p.x / cellSize);
+    const y = Math.floor(p.y / cellSize);
+    const z = Math.floor(p.z / cellSize);
+
+    // 2. Fetch only the segments registered in that cell
+    const segments = cells.get(`${x},${y},${z}`);
+
+    // If no segments exist in this region, the point is definitely not on the boundary (O(1) early exit)
+    if (!segments) return false;
+
+    // 3. Perform the exact point-to-line-segment distance calculation for the few candidates
     const epsSq = eps * eps;
     for (const seg of segments) {
         if (seg.lenSq < 1e-12) {
+            // Handle edge-case: degenerate segments (points)
             if (p.distanceToSquared(seg.a) < epsSq) return true;
             continue;
         }
-        const ap = new THREE.Vector3().subVectors(p, seg.a);
-        const t = ap.dot(seg.ab) / seg.lenSq;
-        if (t >= -1e-2 && t <= 1 + 1e-2) {
-            const proj = seg.a.clone().addScaledVector(seg.ab, t);
-            if (p.distanceToSquared(proj) < epsSq) return true;
+
+        // Vector from segment start A to point P
+        _ap.subVectors(p, seg.a);
+
+        // Project AP onto AB to find normalized position t along the segment
+        const t = _ap.dot(seg.ab) / seg.lenSq;
+
+        // Is the projection strictly between pointA (t=0) and pointB (t=1)?
+        if (t >= -1e-4 && t <= 1 + 1e-4) {
+            // Calculate squared distance from point to the line segment
+            // d^2 = |AP|^2 - (|AP| cos(theta))^2
+            const dSq = Math.max(0, _ap.lengthSq() - (_ap.dot(seg.ab) ** 2) / seg.lenSq);
+            if (dSq < epsSq) return true;
         }
     }
     return false;
@@ -214,33 +304,60 @@ export async function applyKnurling(
     const proj = createProjectionData(geometry, faceIndices, params.angle);
     if (!proj) return geometry;
 
+    const index = geometry.index;
     const posAttr = geometry.attributes.position;
     const islands = getContiguousIslands(geometry, faceIndices);
-    const newPos: number[] = [];
+
+    // --- TOPOLOGICAL INDEXING SETUP ---
+    const vertexMap = new Map<string, number>();
+    const vertices: number[] = [];
+    const newIndices: number[] = [];
+
+    const getVertIndex = (x: number, y: number, z: number): number => {
+        const key = `${Math.round(x * 1e5)},${Math.round(y * 1e5)},${Math.round(z * 1e5)}`;
+        let idx = vertexMap.get(key);
+        if (idx === undefined) {
+            idx = vertices.length / 3;
+            vertexMap.set(key, idx);
+            vertices.push(x, y, z);
+        }
+        return idx;
+    };
 
     // Pre-compute boundary segments for wall generation
     const boundarySegments = getBoundarySegments(geometry, faceIndices);
+    const boundaryGrid = createBoundaryGrid(boundarySegments, 2.0);
     console.log(`[Knurling] Found ${boundarySegments.length} boundary segments.`);
     let wallCount = 0;
 
     islands.forEach(islandIndices => {
         const islandPos = new Float32Array(islandIndices.length * 9);
         islandIndices.forEach((fIdx, i) => {
-            const off = fIdx * 3;
-            islandPos[i * 9 + 0] = posAttr.getX(off); islandPos[i * 9 + 1] = posAttr.getY(off); islandPos[i * 9 + 2] = posAttr.getZ(off);
-            islandPos[i * 9 + 3] = posAttr.getX(off + 1); islandPos[i * 9 + 4] = posAttr.getY(off + 1); islandPos[i * 9 + 5] = posAttr.getZ(off + 1);
-            islandPos[i * 9 + 6] = posAttr.getX(off + 2); islandPos[i * 9 + 7] = posAttr.getY(off + 2); islandPos[i * 9 + 8] = posAttr.getZ(off + 2);
+            const i0 = index ? index.getX(fIdx * 3 + 0) : fIdx * 3 + 0;
+            const i1 = index ? index.getX(fIdx * 3 + 1) : fIdx * 3 + 1;
+            const i2 = index ? index.getX(fIdx * 3 + 2) : fIdx * 3 + 2;
+            islandPos[i * 9 + 0] = posAttr.getX(i0); islandPos[i * 9 + 1] = posAttr.getY(i0); islandPos[i * 9 + 2] = posAttr.getZ(i0);
+            islandPos[i * 9 + 3] = posAttr.getX(i1); islandPos[i * 9 + 4] = posAttr.getY(i1); islandPos[i * 9 + 5] = posAttr.getZ(i1);
+            islandPos[i * 9 + 6] = posAttr.getX(i2); islandPos[i * 9 + 7] = posAttr.getY(i2); islandPos[i * 9 + 8] = posAttr.getZ(i2);
         });
+        // STEP 1: Subdivide selection islands
+        // We subdivide the original triangles in the selection twice
+        // to provide enough geometric resolution for the knurling peaks and valleys.
         const subPos = subdivideTriangles(islandPos, 2);
         const subCount = subPos.length / 9;
 
+        // Calculate pitch variables based on whether the geometry is planar or cylindrical
         const nD_nom = Math.round(proj.circPhys / params.pitch);
         const nD = Math.max(2, nD_nom % 2 === 0 ? nD_nom : nD_nom + 1);
         const pitchP = proj.isPlanar ? params.pitch : (proj.circPhys / nD);
+
+        // Define rotation angle transformation for the UV grid mapping
         const angRad = (params.angle * Math.PI) / 180;
         const factor = Math.cos(angRad) + Math.sin(angRad);
         const pU = pitchP * factor, pV = pitchP * factor;
 
+        // Line intersection logic for Sutherland-Hodgman Polygon Clipping
+        // This cuts overlapping 2D texture polygons strictly to the bounds of the original 3D triangles
         const intersect = (a: any, b: any, e1: any, e2: any) => {
             const da = (e2.u - e1.u) * (a.v - e1.v) - (e2.v - e1.v) * (a.u - e1.u), db = (e2.u - e1.u) * (b.v - e1.v) - (e2.v - e1.v) * (b.u - e1.u);
             const t = Math.abs(da) / (Math.max(1e-10, Math.abs(da) + Math.abs(db)));
@@ -256,12 +373,17 @@ export async function applyKnurling(
             return out;
         };
 
+        // STEP 2: Iterate over all subdivided base triangles.
         for (let t_idx = 0; t_idx < subCount; t_idx++) {
             const off = t_idx * 9;
             const pA_vec = new THREE.Vector3(subPos[off], subPos[off + 1], subPos[off + 2]);
             const pB_vec = new THREE.Vector3(subPos[off + 3], subPos[off + 4], subPos[off + 5]);
             const pC_vec = new THREE.Vector3(subPos[off + 6], subPos[off + 7], subPos[off + 8]);
+
+            // Map 3D points to 2D UV Space
             let pA_uv = proj.project(pA_vec), pB_uv = proj.project(pB_vec), pC_uv = proj.project(pC_vec);
+
+            // Fix unrolling seam for cylindrical coordinates (ensure continuous UV space across 360 wrap)
             if (!proj.isPlanar) {
                 const uVals = [pA_uv.u, pB_uv.u, pC_uv.u];
                 const minU = Math.min(...uVals), maxU = Math.max(...uVals);
@@ -271,17 +393,26 @@ export async function applyKnurling(
                     if (pC_uv.u < proj.circPhys * 0.5) pC_uv.u += proj.circPhys;
                 }
             }
+
+            // Rotate mapped points to desired knurl angle (0, 30, 45, etc.) using `ur` and `vr`
             const rotA = proj.toRot(pA_uv.u, pA_uv.v), rotB = proj.toRot(pB_uv.u, pB_uv.v), rotC = proj.toRot(pC_uv.u, pC_uv.v);
+
+            // Reorient triangulation to be Counter-Clockwise in UV space
             const area = (rotB.ur - rotA.ur) * (rotC.vr - rotA.vr) - (rotB.vr - rotA.vr) * (rotC.ur - rotA.ur);
             const tri = area < 0 ? [{ u: rotA.ur, v: rotA.vr }, { u: rotC.ur, v: rotC.vr }, { u: rotB.ur, v: rotB.vr }] : [{ u: rotA.ur, v: rotA.vr }, { u: rotB.ur, v: rotB.vr }, { u: rotC.ur, v: rotC.vr }];
             const triVecs = area < 0 ? [pA_vec, pC_vec, pB_vec] : [pA_vec, pB_vec, pC_vec];
 
+            // STEP 3: Find bounding box of this triangle in the 2D Knurl Grid
             const iS = Math.floor(Math.min(tri[0].u, tri[1].u, tri[2].u) / pU) - 1, iE = Math.ceil(Math.max(tri[0].u, tri[1].u, tri[2].u) / pU) + 1;
             const jS = Math.floor(Math.min(tri[0].v, tri[1].v, tri[2].v) / pV) - 1, jE = Math.ceil(Math.max(tri[0].v, tri[1].v, tri[2].v) / pV) + 1;
 
+            // Iterate through every applicable 2D pattern cell that intersects this triangle
             for (let j = jS; j <= jE; j++) {
                 for (let i = iS; i <= iE; i++) {
                     const u0 = i * pU, u1 = (i + 1) * pU, v0 = j * pV, v1 = (j + 1) * pV, um = u0 + pU * 0.5, vm = v0 + pV * 0.5;
+
+                    // Generate 2D parametric polygons based on the chosen pattern shape
+                    // `h` determines the height map (0 is base, params.depth is peak)
                     let cell: { u: number; v: number; h: number }[][] = [];
                     if (params.pattern === 'diamond') {
                         const mid = { u: um, v: vm, h: ((Math.abs(i) + Math.abs(j)) % 2 === 0) ? params.depth : 0 };
@@ -293,60 +424,83 @@ export async function applyKnurling(
                         cell = [[{ u: u0, v: v0, h: 0 }, { u: um, v: v0, h: params.depth }, mid], [{ u: um, v: v0, h: params.depth }, { u: u1, v: v0, h: 0 }, mid], [{ u: u1, v: v0, h: 0 }, { u: u1, v: vm, h: params.depth }, mid], [{ u: u1, v: vm, h: params.depth }, { u: u1, v: v1, h: 0 }, mid], [{ u: u1, v: v1, h: 0 }, { u: um, v: v1, h: params.depth }, mid], [{ u: um, v: v1, h: params.depth }, { u: u0, v: v1, h: 0 }, mid], [{ u: u0, v: v1, h: 0 }, { u: u0, v: vm, h: params.depth }, mid], [{ u: u0, v: vm, h: params.depth }, { u: u0, v: v0, h: 0 }, mid]];
                     }
 
+                    // STEP 4: Process and extrude the generated shape
                     cell.forEach(kTri => {
+                        // Sutherland-Hodgman clipping: Clip the 2D knurl polygon to the borders of the base 3D triangle
+                        // This prevents texturing from bleeding outside the strict triangle boundaries.
                         let poly = kTri; poly = clip(poly, tri[0], tri[1]); poly = clip(poly, tri[1], tri[2]); poly = clip(poly, tri[2], tri[0]);
+
                         if (poly.length >= 3) {
+
+                            // STEP 5: Extrude the Inner Face Geometry
+                            // Convert the clipped 2D UV polygon back into 3D using Barycentric Coordinates
                             for (let v = 1; v < poly.length - 1; v++) {
                                 const pts = [poly[0], poly[v], poly[v + 1]];
-                                const tempTri: THREE.Vector3[] = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
-                                const tempOrig: THREE.Vector3[] = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
-                                const tempIsBound: boolean[] = [false, false, false];
+                                const tempTri: number[] = [-1, -1, -1];
 
                                 pts.forEach((p, pIdx) => {
                                     const w = getBarycentric(p, tri[0], tri[1], tri[2]);
                                     const pBase = new THREE.Vector3().addScaledVector(triVecs[0], w.wA).addScaledVector(triVecs[1], w.wB).addScaledVector(triVecs[2], w.wC);
                                     const p0_u = proj.fromRot(p.u, p.v);
                                     const norm = proj.getNormal(p0_u.u, p0_u.v);
-                                    const vFinal = pBase.addScaledVector(norm, p.h);
+                                    const vFinal = pBase.addScaledVector(norm, (p as any).h || 0);
 
-                                    // Store base vertex and boundary check
-                                    tempOrig[pIdx] = pBase;
-                                    tempIsBound[pIdx] = isOnAnySegment(pBase, boundarySegments);
+                                    const vIdx = getVertIndex(vFinal.x, vFinal.y, vFinal.z);
 
                                     if (proj.depthSign < 0) {
                                         // Reverse order for internal surfaces
-                                        if (pIdx === 0) tempTri[0] = vFinal;
-                                        else if (pIdx === 1) tempTri[1] = vFinal;
-                                        else tempTri[2] = vFinal;
+                                        if (pIdx === 0) tempTri[0] = vIdx;
+                                        else if (pIdx === 1) tempTri[1] = vIdx;
+                                        else tempTri[2] = vIdx;
                                     } else {
-                                        newPos.push(vFinal.x, vFinal.y, vFinal.z);
-                                        tempTri[pIdx] = vFinal;
+                                        tempTri[pIdx] = vIdx;
                                     }
                                 });
 
                                 if (proj.depthSign < 0) {
-                                    newPos.push(tempTri[2].x, tempTri[2].y, tempTri[2].z, tempTri[1].x, tempTri[1].y, tempTri[1].z, tempTri[0].x, tempTri[0].y, tempTri[0].z);
+                                    newIndices.push(tempTri[2], tempTri[1], tempTri[0]);
+                                } else {
+                                    newIndices.push(tempTri[0], tempTri[1], tempTri[2]);
                                 }
+                            }
 
-                                // --- Wall Stitching ---
-                                // If any two vertices of the triangle are on the boundary, create a wall between them.
-                                for (let k = 0; k < 3; k++) {
-                                    const k2 = (k + 1) % 3;
-                                    if (tempIsBound[k] && tempIsBound[k2]) {
-                                        const p1 = tempOrig[k], p2 = tempOrig[k2];
-                                        const p1_d = tempTri[k], p2_d = tempTri[k2];
+                            // --- Outer Perimeter Wall Extrusion via Midpoints ---
+                            for (let v = 0; v < poly.length; v++) {
+                                const pA = poly[v], pB = poly[(v + 1) % poly.length];
 
-                                        // Generate Double-Sided Quad (to ensure visibility regardless of normal)
-                                        // Side A (Standard)
-                                        newPos.push(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, p1_d.x, p1_d.y, p1_d.z);
-                                        newPos.push(p2.x, p2.y, p2.z, p2_d.x, p2_d.y, p2_d.z, p1_d.x, p1_d.y, p1_d.z);
+                                const wA = getBarycentric(pA, tri[0], tri[1], tri[2]);
+                                const vBaseA = new THREE.Vector3().addScaledVector(triVecs[0], wA.wA).addScaledVector(triVecs[1], wA.wB).addScaledVector(triVecs[2], wA.wC);
 
-                                        // Side B (Inverted)
-                                        newPos.push(p1.x, p1.y, p1.z, p1_d.x, p1_d.y, p1_d.z, p2.x, p2.y, p2.z);
-                                        newPos.push(p2.x, p2.y, p2.z, p1_d.x, p1_d.y, p1_d.z, p2_d.x, p2_d.y, p2_d.z);
+                                const wB = getBarycentric(pB, tri[0], tri[1], tri[2]);
+                                const vBaseB = new THREE.Vector3().addScaledVector(triVecs[0], wB.wA).addScaledVector(triVecs[1], wB.wB).addScaledVector(triVecs[2], wB.wC);
 
-                                        wallCount++;
-                                    }
+                                const vMid = new THREE.Vector3().lerpVectors(vBaseA, vBaseB, 0.5);
+
+                                if (isOnAnySegmentGrid(vMid, boundaryGrid, 1e-4)) {
+                                    const pA_u = proj.fromRot(pA.u, pA.v);
+                                    const pB_u = proj.fromRot(pB.u, pB.v);
+
+                                    const nA = proj.getNormal(pA_u.u, pA_u.v);
+                                    const nB = proj.getNormal(pB_u.u, pB_u.v);
+
+                                    const valA = (pA as any).h !== undefined ? (pA as any).h : 0;
+                                    const valB = (pB as any).h !== undefined ? (pB as any).h : 0;
+
+                                    if (Math.abs(valA) < 1e-4 && Math.abs(valB) < 1e-4) continue;
+
+                                    const vExtA = vBaseA.clone().addScaledVector(nA, valA);
+                                    const vExtB = vBaseB.clone().addScaledVector(nB, valB);
+
+                                    const idxBaseA = getVertIndex(vBaseA.x, vBaseA.y, vBaseA.z);
+                                    const idxBaseB = getVertIndex(vBaseB.x, vBaseB.y, vBaseB.z);
+                                    const idxExtA = getVertIndex(vExtA.x, vExtA.y, vExtA.z);
+                                    const idxExtB = getVertIndex(vExtB.x, vExtB.y, vExtB.z);
+
+                                    // For manifoldness, the wall base must be (BaseB, BaseA) 
+                                    // because the selection face uses (BaseA, BaseB).
+                                    newIndices.push(idxBaseB, idxBaseA, idxExtA);
+                                    newIndices.push(idxBaseB, idxExtA, idxExtB);
+                                    wallCount++;
                                 }
                             }
                         }
@@ -355,13 +509,32 @@ export async function applyKnurling(
             }
         }
     });
+
     console.log(`[Knurling] Generated ${wallCount} wall quads.`);
 
-    const finalR: number[] = []; const sel = new Set(faceIndices);
-    for (let f = 0; f < posAttr.count / 3; f++) { if (!sel.has(f)) { for (let v = 0; v < 3; v++) { const idx = f * 3 + v; finalR.push(posAttr.getX(idx), posAttr.getY(idx), posAttr.getZ(idx)); } } }
-    const combined = new Float32Array(finalR.length + newPos.length); combined.set(finalR); combined.set(newPos, finalR.length);
-    const finalGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(combined, 3));
-    const repaired = params.holeFillEnabled ? await repairGeometry(finalGeo, params.holeFillThreshold) : finalGeo;
+    // Map all unselected (original base) faces into the same vertexMap
+    const sel = new Set(faceIndices);
+    const faceCount = index ? index.count / 3 : posAttr.count / 3;
+
+    for (let f = 0; f < faceCount; f++) {
+        if (!sel.has(f)) {
+            const i0 = index ? index.getX(f * 3 + 0) : f * 3 + 0;
+            const i1 = index ? index.getX(f * 3 + 1) : f * 3 + 1;
+            const i2 = index ? index.getX(f * 3 + 2) : f * 3 + 2;
+
+            const a = getVertIndex(posAttr.getX(i0), posAttr.getY(i0), posAttr.getZ(i0));
+            const b = getVertIndex(posAttr.getX(i1), posAttr.getY(i1), posAttr.getZ(i1));
+            const c = getVertIndex(posAttr.getX(i2), posAttr.getY(i2), posAttr.getZ(i2));
+            newIndices.push(a, b, c);
+        }
+    }
+
+    const finalGeo = new THREE.BufferGeometry();
+    finalGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertices), 3));
+    finalGeo.setIndex(newIndices);
+
+    // Repair manifoldness if absolutely necessary, but topology *should* be perfect now
+    const repaired = params.holeFillEnabled ? await repairWithManifold(finalGeo, { holeDiameterMultiplier: params.holeFillThreshold }) : finalGeo;
     repaired.computeVertexNormals();
     return repaired;
 }
@@ -393,22 +566,41 @@ export async function applyHoneycomb(
     const s = (W / 2) / (Math.sqrt(3) / 2); // Side length
     const H = 1.5 * s; // Vertical distance between rows
 
+    const index = geometry.index;
     const posAttr = geometry.attributes.position;
     const islands = getContiguousIslands(geometry, faceIndices);
-    const newPos: number[] = [];
+
+    // --- TOPOLOGICAL INDEXING SETUP ---
+    const vertexMap = new Map<string, number>();
+    const vertices: number[] = [];
+    const newIndices: number[] = [];
+
+    const getVertIndex = (x: number, y: number, z: number): number => {
+        const key = `${Math.round(x * 1e5)},${Math.round(y * 1e5)},${Math.round(z * 1e5)}`;
+        let idx = vertexMap.get(key);
+        if (idx === undefined) {
+            idx = vertices.length / 3;
+            vertexMap.set(key, idx);
+            vertices.push(x, y, z);
+        }
+        return idx;
+    };
 
     // Boundary segments for wall stitching
     const boundarySegments = getBoundarySegments(geometry, faceIndices);
+    const boundaryGrid = createBoundaryGrid(boundarySegments, 2.0);
     console.log(`[Honeycomb] Found ${boundarySegments.length} boundary segments.`);
     let wallCount = 0;
 
     islands.forEach(islandIndices => {
         const islandPos = new Float32Array(islandIndices.length * 9);
         islandIndices.forEach((fIdx, i) => {
-            const off = fIdx * 3;
-            islandPos[i * 9 + 0] = posAttr.getX(off); islandPos[i * 9 + 1] = posAttr.getY(off); islandPos[i * 9 + 2] = posAttr.getZ(off);
-            islandPos[i * 9 + 3] = posAttr.getX(off + 1); islandPos[i * 9 + 4] = posAttr.getY(off + 1); islandPos[i * 9 + 5] = posAttr.getZ(off + 1);
-            islandPos[i * 9 + 6] = posAttr.getX(off + 2); islandPos[i * 9 + 7] = posAttr.getY(off + 2); islandPos[i * 9 + 8] = posAttr.getZ(off + 2);
+            const i0 = index ? index.getX(fIdx * 3 + 0) : fIdx * 3 + 0;
+            const i1 = index ? index.getX(fIdx * 3 + 1) : fIdx * 3 + 1;
+            const i2 = index ? index.getX(fIdx * 3 + 2) : fIdx * 3 + 2;
+            islandPos[i * 9 + 0] = posAttr.getX(i0); islandPos[i * 9 + 1] = posAttr.getY(i0); islandPos[i * 9 + 2] = posAttr.getZ(i0);
+            islandPos[i * 9 + 3] = posAttr.getX(i1); islandPos[i * 9 + 4] = posAttr.getY(i1); islandPos[i * 9 + 5] = posAttr.getZ(i1);
+            islandPos[i * 9 + 6] = posAttr.getX(i2); islandPos[i * 9 + 7] = posAttr.getY(i2); islandPos[i * 9 + 8] = posAttr.getZ(i2);
         });
         const subPos = subdivideTriangles(islandPos, 2);
         const subCount = subPos.length / 9;
@@ -489,11 +681,10 @@ export async function applyHoneycomb(
                     hexTris.forEach(kTri => {
                         let poly = kTri; poly = clip(poly, tri[0], tri[1]); poly = clip(poly, tri[1], tri[2]); poly = clip(poly, tri[2], tri[0]);
                         if (poly.length >= 3) {
+                            // STEP 5: Extrude the Inner Face Geometry
                             for (let v = 1; v < poly.length - 1; v++) {
                                 const pts = [poly[0], poly[v], poly[v + 1]];
-                                const tempTri: THREE.Vector3[] = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
-                                const tempOrig: THREE.Vector3[] = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
-                                const tempIsBound: boolean[] = [false, false, false];
+                                const tempTri: number[] = [-1, -1, -1];
 
                                 pts.forEach((p, pIdx) => {
                                     const w = getBarycentric(p, tri[0], tri[1], tri[2]);
@@ -502,39 +693,67 @@ export async function applyHoneycomb(
                                     const norm = proj.getNormal(p0_u.u, p0_u.v);
                                     const vFinal = pBase.addScaledVector(norm, (p as any).h || 0);
 
-                                    tempOrig[pIdx] = pBase;
-                                    tempIsBound[pIdx] = isOnAnySegment(pBase, boundarySegments);
+                                    const vIdx = getVertIndex(vFinal.x, vFinal.y, vFinal.z);
 
                                     if (proj.depthSign < 0) {
-                                        if (pIdx === 0) tempTri[0] = vFinal;
-                                        else if (pIdx === 1) tempTri[1] = vFinal;
-                                        else tempTri[2] = vFinal;
+                                        if (pIdx === 0) tempTri[0] = vIdx;
+                                        else if (pIdx === 1) tempTri[1] = vIdx;
+                                        else tempTri[2] = vIdx;
                                     } else {
-                                        newPos.push(vFinal.x, vFinal.y, vFinal.z);
-                                        tempTri[pIdx] = vFinal;
+                                        tempTri[pIdx] = vIdx;
                                     }
                                 });
 
                                 if (proj.depthSign < 0) {
-                                    newPos.push(tempTri[2].x, tempTri[2].y, tempTri[2].z, tempTri[1].x, tempTri[1].y, tempTri[1].z, tempTri[0].x, tempTri[0].y, tempTri[0].z);
+                                    newIndices.push(tempTri[2], tempTri[1], tempTri[0]);
+                                } else {
+                                    newIndices.push(tempTri[0], tempTri[1], tempTri[2]);
                                 }
+                            }
 
-                                // --- Wall Stitching ---
-                                for (let k = 0; k < 3; k++) {
-                                    const k2 = (k + 1) % 3;
-                                    if (tempIsBound[k] && tempIsBound[k2]) {
-                                        const p1 = tempOrig[k], p2 = tempOrig[k2];
-                                        const p1_d = tempTri[k], p2_d = tempTri[k2];
+                            // STEP 6: Outer Perimeter Wall Extrusion via Exact Geometric Midpoints
+                            // Similar to Knurling, we iterate the inner polygon structure near the boundaries.
+                            // If the midpoint of an edge rests precisely on the user-selected mesh boundary,
+                            // we duplicate those two vertices and extrude them down/up to seal the volume.
+                            for (let v = 0; v < poly.length; v++) {
+                                const pA = poly[v], pB = poly[(v + 1) % poly.length];
 
-                                        // Generate Double-Sided Quad
-                                        // Side A
-                                        newPos.push(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, p1_d.x, p1_d.y, p1_d.z);
-                                        newPos.push(p2.x, p2.y, p2.z, p2_d.x, p2_d.y, p2_d.z, p1_d.x, p1_d.y, p1_d.z);
-                                        // Side B
-                                        newPos.push(p1.x, p1.y, p1.z, p1_d.x, p1_d.y, p1_d.z, p2.x, p2.y, p2.z);
-                                        newPos.push(p2.x, p2.y, p2.z, p1_d.x, p1_d.y, p1_d.z, p2_d.x, p2_d.y, p2_d.z);
-                                        wallCount++;
-                                    }
+                                const wA = getBarycentric(pA, tri[0], tri[1], tri[2]);
+                                const vBaseA = new THREE.Vector3().addScaledVector(triVecs[0], wA.wA).addScaledVector(triVecs[1], wA.wB).addScaledVector(triVecs[2], wA.wC);
+
+                                const wB = getBarycentric(pB, tri[0], tri[1], tri[2]);
+                                const vBaseB = new THREE.Vector3().addScaledVector(triVecs[0], wB.wA).addScaledVector(triVecs[1], wB.wB).addScaledVector(triVecs[2], wB.wC);
+
+                                const vMid = new THREE.Vector3().lerpVectors(vBaseA, vBaseB, 0.5);
+
+                                if (isOnAnySegmentGrid(vMid, boundaryGrid, 1e-4)) {
+                                    const pA_u = proj.fromRot(pA.u, pA.v);
+                                    const pB_u = proj.fromRot(pB.u, pB.v);
+
+                                    const nA = proj.getNormal(pA_u.u, pA_u.v);
+                                    const nB = proj.getNormal(pB_u.u, pB_u.v);
+
+                                    // Gather exact extruding parameters (normal and target height)
+                                    // Height is `valA` and `valB`, which depends on whether the hexagon edge
+                                    // belongs to the inner cavity or outer perimeter
+                                    const valA = (pA as any).h !== undefined ? (pA as any).h : 0;
+                                    const valB = (pB as any).h !== undefined ? (pB as any).h : 0;
+
+                                    if (Math.abs(valA) < 1e-4 && Math.abs(valB) < 1e-4) continue;
+
+                                    const vExtA = vBaseA.clone().addScaledVector(nA, valA);
+                                    const vExtB = vBaseB.clone().addScaledVector(nB, valB);
+
+                                    const idxBaseA = getVertIndex(vBaseA.x, vBaseA.y, vBaseA.z);
+                                    const idxBaseB = getVertIndex(vBaseB.x, vBaseB.y, vBaseB.z);
+                                    const idxExtA = getVertIndex(vExtA.x, vExtA.y, vExtA.z);
+                                    const idxExtB = getVertIndex(vExtB.x, vExtB.y, vExtB.z);
+
+                                    // For manifoldness, the wall base must be (BaseB, BaseA) 
+                                    // because the selection face uses (BaseA, BaseB).
+                                    newIndices.push(idxBaseB, idxBaseA, idxExtA);
+                                    newIndices.push(idxBaseB, idxExtA, idxExtB);
+                                    wallCount++;
                                 }
                             }
                         }
@@ -544,11 +763,30 @@ export async function applyHoneycomb(
         }
     });
 
-    const finalR: number[] = []; const sel = new Set(faceIndices);
-    for (let f = 0; f < posAttr.count / 3; f++) { if (!sel.has(f)) { for (let v = 0; v < 3; v++) { const idx = f * 3 + v; finalR.push(posAttr.getX(idx), posAttr.getY(idx), posAttr.getZ(idx)); } } }
-    const combined = new Float32Array(finalR.length + newPos.length); combined.set(finalR); combined.set(newPos, finalR.length);
-    const finalGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(combined, 3));
-    const repaired = params.holeFillEnabled ? await repairGeometry(finalGeo, params.holeFillThreshold) : finalGeo;
+    console.log(`[Honeycomb] Generated ${wallCount} wall quads.`);
+
+    // Map all unselected (original base) faces into the same vertexMap
+    const sel = new Set(faceIndices);
+    const faceCount = index ? index.count / 3 : posAttr.count / 3;
+
+    for (let f = 0; f < faceCount; f++) {
+        if (!sel.has(f)) {
+            const i0 = index ? index.getX(f * 3 + 0) : f * 3 + 0;
+            const i1 = index ? index.getX(f * 3 + 1) : f * 3 + 1;
+            const i2 = index ? index.getX(f * 3 + 2) : f * 3 + 2;
+
+            const a = getVertIndex(posAttr.getX(i0), posAttr.getY(i0), posAttr.getZ(i0));
+            const b = getVertIndex(posAttr.getX(i1), posAttr.getY(i1), posAttr.getZ(i1));
+            const c = getVertIndex(posAttr.getX(i2), posAttr.getY(i2), posAttr.getZ(i2));
+            newIndices.push(a, b, c);
+        }
+    }
+
+    const finalGeo = new THREE.BufferGeometry();
+    finalGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertices), 3));
+    finalGeo.setIndex(newIndices);
+
+    const repaired = params.holeFillEnabled ? await repairWithManifold(finalGeo, { holeDiameterMultiplier: params.holeFillThreshold }) : finalGeo;
     repaired.computeVertexNormals();
     return repaired;
 }
@@ -564,20 +802,40 @@ export async function applyFuzzySkin(
 ): Promise<THREE.BufferGeometry> {
     const islands = getContiguousIslands(geometry, faceIndices);
     const posAttr = geometry.attributes.position;
-    const newPos: number[] = [];
 
-    // For fuzzy skin, we will just CLAMP the noise to 0 near the border.
-    // Walls are messy for noise meshes.
+    // --- TOPOLOGICAL INDEXING SETUP ---
+    const vertexMap = new Map<string, number>();
+    const vertices: number[] = [];
+    const newIndices: number[] = [];
+
+    const getVertIndex = (x: number, y: number, z: number): number => {
+        const key = `${Math.round(x * 1e5)},${Math.round(y * 1e5)},${Math.round(z * 1e5)}`;
+        let idx = vertexMap.get(key);
+        if (idx === undefined) {
+            idx = vertices.length / 3;
+            vertexMap.set(key, idx);
+            vertices.push(x, y, z);
+        }
+        return idx;
+    };
+
+    // Fuzzy Skin does not need complex perimeter wall generation like knurling/honeycomb.
+    // Instead, to keep boundaries watertight with the original, we just CLAMP the applied noise
+    // to 0 for any points that fall smoothly within the fuzzy skin edge seam.
     const boundarySegments = getBoundarySegments(geometry, faceIndices);
+    const boundaryGrid = createBoundaryGrid(boundarySegments, 2.0);
     const clampDist = params.holeFillThreshold;
 
+    const index = geometry.index;
     islands.forEach(islandIndices => {
         const islandPos = new Float32Array(islandIndices.length * 9);
         islandIndices.forEach((fIdx, i) => {
-            const off = fIdx * 3;
-            islandPos[i * 9 + 0] = posAttr.getX(off); islandPos[i * 9 + 1] = posAttr.getY(off); islandPos[i * 9 + 2] = posAttr.getZ(off);
-            islandPos[i * 9 + 3] = posAttr.getX(off + 1); islandPos[i * 9 + 4] = posAttr.getY(off + 1); islandPos[i * 9 + 5] = posAttr.getZ(off + 1);
-            islandPos[i * 9 + 6] = posAttr.getX(off + 2); islandPos[i * 9 + 7] = posAttr.getY(off + 2); islandPos[i * 9 + 8] = posAttr.getZ(off + 2);
+            const i0 = index ? index.getX(fIdx * 3 + 0) : fIdx * 3 + 0;
+            const i1 = index ? index.getX(fIdx * 3 + 1) : fIdx * 3 + 1;
+            const i2 = index ? index.getX(fIdx * 3 + 2) : fIdx * 3 + 2;
+            islandPos[i * 9 + 0] = posAttr.getX(i0); islandPos[i * 9 + 1] = posAttr.getY(i0); islandPos[i * 9 + 2] = posAttr.getZ(i0);
+            islandPos[i * 9 + 3] = posAttr.getX(i1); islandPos[i * 9 + 4] = posAttr.getY(i1); islandPos[i * 9 + 5] = posAttr.getZ(i1);
+            islandPos[i * 9 + 6] = posAttr.getX(i2); islandPos[i * 9 + 7] = posAttr.getY(i2); islandPos[i * 9 + 8] = posAttr.getZ(i2);
         });
 
         // 1. Homogeneous Density Calculation
@@ -588,6 +846,10 @@ export async function applyFuzzySkin(
         for (let s = 0; s < MAX_STEPS; s++) {
             let needsMore = false;
             const triCount = currentSubPos.length / 9;
+
+            // Safety cap: don't subdivide if we already have > 1,000,000 triangles to prevent memory crash
+            if (triCount > 1000000) break;
+
             for (let i = 0; i < triCount; i++) {
                 const o = i * 9;
                 const d12 = distSq(currentSubPos[o], currentSubPos[o + 1], currentSubPos[o + 2], currentSubPos[o + 3], currentSubPos[o + 4], currentSubPos[o + 5]);
@@ -617,9 +879,10 @@ export async function applyFuzzySkin(
             const px = positions[i * 3], py = positions[i * 3 + 1], pz = positions[i * 3 + 2];
             const p = new THREE.Vector3(px, py, pz);
 
-            // Check boundary distance
-            // If near boundary, set noise to 0 to prevent tearing
-            if (isOnAnySegment(p, boundarySegments, clampDist)) {
+            // Check border collision using the high-performance Spatial Hash grid.
+            // If the point is within the `clampDist` distance of a boundary, we apply 0 noise
+            // so the generated geometry remains perfectly flush and manifold with the rest of the model.
+            if (isOnAnySegmentGrid(p, boundaryGrid, clampDist)) {
                 noise = 0;
             }
 
@@ -628,18 +891,47 @@ export async function applyFuzzySkin(
             positions[i * 3 + 2] += normals[i * 3 + 2] * noise;
         }
 
-        // 4. Conversion to final positions
-        const finalIslandPos = subGeo.toNonIndexed().attributes.position.array as any as Float32Array;
-        for (let i = 0; i < finalIslandPos.length; i++) {
-            newPos.push(finalIslandPos[i]);
+        // 4. Conversion to final indexed geometry
+        const finalIslandPos = subGeo.attributes.position.array as any as Float32Array;
+        const finalIslandIdx = subGeo.getIndex()?.array || Array.from({ length: finalIslandPos.length / 3 }, (_, k) => k);
+
+        for (let i = 0; i < finalIslandIdx.length; i += 3) {
+            const i0 = finalIslandIdx[i] * 3, i1 = finalIslandIdx[i + 1] * 3, i2 = finalIslandIdx[i + 2] * 3;
+
+            const px0 = finalIslandPos[i0], py0 = finalIslandPos[i0 + 1], pz0 = finalIslandPos[i0 + 2];
+            const px1 = finalIslandPos[i1], py1 = finalIslandPos[i1 + 1], pz1 = finalIslandPos[i1 + 2];
+            const px2 = finalIslandPos[i2], py2 = finalIslandPos[i2 + 1], pz2 = finalIslandPos[i2 + 2];
+
+            newIndices.push(
+                getVertIndex(px0, py0, pz0),
+                getVertIndex(px1, py1, pz1),
+                getVertIndex(px2, py2, pz2)
+            );
         }
     });
 
-    const finalR: number[] = []; const sel = new Set(faceIndices);
-    for (let f = 0; f < posAttr.count / 3; f++) { if (!sel.has(f)) { for (let v = 0; v < 3; v++) { const idx = f * 3 + v; finalR.push(posAttr.getX(idx), posAttr.getY(idx), posAttr.getZ(idx)); } } }
-    const combined = new Float32Array(finalR.length + newPos.length); combined.set(finalR); combined.set(newPos, finalR.length);
-    const finalGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(combined, 3));
-    const repaired = params.holeFillEnabled ? await repairGeometry(finalGeo, params.holeFillThreshold) : finalGeo;
+    // Map all unselected (original base) faces into the same vertexMap
+    const sel = new Set(faceIndices);
+    const faceCount = index ? index.count / 3 : posAttr.count / 3;
+
+    for (let f = 0; f < faceCount; f++) {
+        if (!sel.has(f)) {
+            const i0 = index ? index.getX(f * 3 + 0) : f * 3 + 0;
+            const i1 = index ? index.getX(f * 3 + 1) : f * 3 + 1;
+            const i2 = index ? index.getX(f * 3 + 2) : f * 3 + 2;
+
+            const a = getVertIndex(posAttr.getX(i0), posAttr.getY(i0), posAttr.getZ(i0));
+            const b = getVertIndex(posAttr.getX(i1), posAttr.getY(i1), posAttr.getZ(i1));
+            const c = getVertIndex(posAttr.getX(i2), posAttr.getY(i2), posAttr.getZ(i2));
+            newIndices.push(a, b, c);
+        }
+    }
+
+    const finalGeo = new THREE.BufferGeometry();
+    finalGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertices), 3));
+    finalGeo.setIndex(newIndices);
+
+    const repaired = params.holeFillEnabled ? await repairWithManifold(finalGeo, { holeDiameterMultiplier: params.holeFillThreshold }) : finalGeo;
     repaired.computeVertexNormals();
     return repaired;
 }

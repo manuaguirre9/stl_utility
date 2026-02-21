@@ -1,7 +1,8 @@
 import React, { useState, useRef } from 'react';
 import { useStore } from '../../store/useStore';
 import type { KnurlPattern } from '../../utils/texturizeUtils';
-import { Eye, EyeOff, Box, Trash2, Scissors, Grid3X3, X, RotateCcw, Zap } from 'lucide-react';
+import { Eye, EyeOff, Box, Trash2, Scissors, Grid3X3, X, RotateCcw, Zap, Plus } from 'lucide-react';
+import { Tooltip } from '../UI/Tooltip';
 import { v4 as uuidv4 } from 'uuid';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { fitCylinderToSelection } from '../../utils/meshUtils';
@@ -48,8 +49,8 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const [holeFillEnabled, setHoleFillEnabled] = useState(true);
     const [fuzzyThickness, setFuzzyThickness] = useState(0.2);
     const [pointDistance, setPointDistance] = useState(0.2);
-    const [repairEdgeMult, setRepairEdgeMult] = useState(3);
-    const [repairHoleMult, setRepairHoleMult] = useState(10);
+    const [repairEdgeMult] = useState(50);
+    const [repairHoleMult] = useState(200);
 
     // Sync with re-edit params
     React.useEffect(() => {
@@ -78,9 +79,10 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
     const selectedModel = models.find((m) => m.id === selectedId);
 
     // Stitching State
-    const [stitchStats, setStitchStats] = useState<{ openEdges: number, nonManifoldEdges: number, avgEdgeLength: number, boundaryEdgePositions: Float32Array } | null>(null);
-    const [analyzedHoles, setAnalyzedHoles] = useState<any[] | null>(null);
-    const [isRepairing, setIsRepairing] = useState(false);
+    const [stitchStats, setStitchStats] = React.useState<{ openEdges: number, nonManifoldEdges: number, avgEdgeLength: number } | null>(null);
+    const [analyzedHoles, setAnalyzedHoles] = React.useState<any[] | null>(null);
+    const [rawBoundaries, setRawBoundaries] = React.useState<Float32Array | null>(null);
+    const [isRepairing, setIsRepairing] = React.useState(false);
     const setBoundaryEdges = useStore((state) => state.setBoundaryEdges);
 
     // Auto-analyze when entering stitching mode
@@ -89,17 +91,19 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
             import('../../utils/meshUtils').then(({ analyzeMesh }) => {
                 const stats = analyzeMesh(selectedModel.bufferGeometry);
                 setStitchStats(stats);
-                setBoundaryEdges(selectedModel.id, stats.boundaryEdgePositions);
+                setBoundaryEdges(selectedModel.id, stats.openEdgePositions, stats.nonManifoldEdgePositions);
             });
             import('../../utils/manifoldRepairService').then(({ analyzeRepairableHoles }) => {
                 const results = analyzeRepairableHoles(selectedModel.bufferGeometry);
                 setAnalyzedHoles(results.holes);
+                setRawBoundaries(results.rawBoundaries);
             });
         } else {
             setStitchStats(null);
             setAnalyzedHoles(null);
+            setRawBoundaries(null);
             if (selectedId) {
-                setBoundaryEdges(selectedId, null);
+                setBoundaryEdges(selectedId, null, null);
                 useStore.getState().setFillPreviewEdges(selectedId, null, null);
             }
         }
@@ -123,21 +127,27 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
             }
         });
 
+        if (rawBoundaries) {
+            for (let i = 0; i < rawBoundaries.length; i++) {
+                unfillable.push(rawBoundaries[i]);
+            }
+        }
+
         useStore.getState().setFillPreviewEdges(
             selectedId,
             fillable.length > 0 ? new Float32Array(fillable) : null,
             unfillable.length > 0 ? new Float32Array(unfillable) : null
         );
-    }, [analyzedHoles, repairEdgeMult, repairHoleMult, stitchStats, selectedId]);
+    }, [analyzedHoles, rawBoundaries, repairEdgeMult, repairHoleMult, stitchStats, selectedId]);
 
-    const handleStitchRepair = async () => {
+    const handleRepair = async () => {
         if (!selectedId) return;
         setIsRepairing(true);
         try {
-            await useStore.getState().applyStitchRepair(selectedId);
-            // No need to manually re-analyze here.
-            // The useEffect on [transformMode, selectedModel?.meshVersion, selectedId]
-            // will automatically re-trigger because applyStitchRepair increments meshVersion.
+            await applyManifoldRepair(selectedId, {
+                edgeMultiplier: 50,
+                holeDiameterMultiplier: 200
+            });
         } finally {
             setIsRepairing(false);
         }
@@ -257,21 +267,23 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                             accept=".stl"
                             style={{ display: 'none' }}
                         />
-                        <button
-                            onClick={() => fileInputRef.current?.click()}
-                            style={{
-                                color: 'var(--accent-primary)',
-                                fontSize: '20px',
-                                fontWeight: 'bold',
-                                cursor: 'pointer',
-                                padding: '4px',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center'
-                            }}
-                        >
-                            +
-                        </button>
+                        <Tooltip content="Import STL File" icon={<Plus size={12} />} align="left">
+                            <button
+                                onClick={() => fileInputRef.current?.click()}
+                                style={{
+                                    color: 'var(--accent-primary)',
+                                    fontSize: '20px',
+                                    fontWeight: 'bold',
+                                    cursor: 'pointer',
+                                    padding: '4px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center'
+                                }}
+                            >
+                                <Plus size={18} />
+                            </button>
+                        </Tooltip>
                     </div>
                 </div>
 
@@ -297,26 +309,30 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                             <span style={{ flex: 1, fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                                 {model.name}
                             </span>
-                            <button
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    updateModel(model.id, { visible: !model.visible });
-                                }}
-                                style={{ padding: '2px', marginRight: '4px' }}
-                            >
-                                {model.visible ? <Eye size={14} /> : <EyeOff size={14} />}
-                            </button>
-                            <button
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    removeModel(model.id);
-                                }}
-                                style={{ padding: '2px', color: 'var(--text-muted)' }}
-                                onMouseEnter={(e) => e.currentTarget.style.color = '#ff4444'}
-                                onMouseLeave={(e) => e.currentTarget.style.color = 'var(--text-muted)'}
-                            >
-                                <Trash2 size={14} />
-                            </button>
+                            <Tooltip content={model.visible ? "Hide Model" : "Show Model"} align="left">
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        updateModel(model.id, { visible: !model.visible });
+                                    }}
+                                    style={{ padding: '2px', marginRight: '4px' }}
+                                >
+                                    {model.visible ? <Eye size={14} /> : <EyeOff size={14} />}
+                                </button>
+                            </Tooltip>
+                            <Tooltip content="Delete Model" align="left">
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        removeModel(model.id);
+                                    }}
+                                    style={{ padding: '2px', color: 'var(--text-muted)' }}
+                                    onMouseEnter={(e) => e.currentTarget.style.color = '#ff4444'}
+                                    onMouseLeave={(e) => e.currentTarget.style.color = 'var(--text-muted)'}
+                                >
+                                    <Trash2 size={14} />
+                                </button>
+                            </Tooltip>
                         </div>
                     ))}
                     {models.length === 0 && (
@@ -359,103 +375,57 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                 )}
                             </div>
 
-                            <button
-                                onClick={handleStitchRepair}
-                                disabled={!stitchStats || isRepairing || isProcessing}
-                                style={{
+                            <Tooltip content="Launch Advanced Mesh Repair (Watertight)" icon={<Zap size={12} />} align="left">
+                                <button
+                                    onClick={handleRepair}
+                                    disabled={!stitchStats || isRepairing || isProcessing}
+                                    style={{
+                                        padding: '12px',
+                                        backgroundColor: 'var(--accent-primary)',
+                                        color: 'white',
+                                        border: 'none',
+                                        borderRadius: '8px',
+                                        fontWeight: 600,
+                                        cursor: 'pointer',
+                                        opacity: (!stitchStats || isRepairing) ? 0.5 : 1,
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        gap: '8px',
+                                        width: '100%'
+                                    }}
+                                >
+                                    {isRepairing ? (
+                                        <>
+                                            <RotateCcw className="spin" size={16} /> Repairing...
+                                        </>
+                                    ) : (
+                                        <>
+                                            <Zap size={16} /> Repair & Stitch (Watertight)
+                                        </>
+                                    )}
+                                </button>
+                            </Tooltip>
+
+                            {stitchStats && (
+                                <div style={{
                                     padding: '12px',
-                                    backgroundColor: 'var(--accent-primary)',
-                                    color: 'white',
-                                    border: 'none',
+                                    backgroundColor: 'rgba(0, 210, 255, 0.05)',
                                     borderRadius: '8px',
-                                    fontWeight: 600,
-                                    cursor: 'pointer',
-                                    opacity: (!stitchStats || isRepairing) ? 0.5 : 1,
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    gap: '8px'
-                                }}
-                            >
-                                {isRepairing ? (
-                                    <>
-                                        <RotateCcw className="spin" size={16} /> Repairing...
-                                    </>
-                                ) : (
-                                    <>
-                                        <Box size={16} /> Repair & Stitch Mesh
-                                    </>
-                                )}
-                            </button>
-
-                            <button
-                                onClick={() => applyManifoldRepair(selectedModel.id, {
-                                    edgeMultiplier: repairEdgeMult,
-                                    holeDiameterMultiplier: repairHoleMult
-                                })}
-                                disabled={isProcessing}
-                                style={{
-                                    padding: '12px',
-                                    backgroundColor: 'rgba(0, 210, 255, 0.1)',
-                                    color: '#00d2ff',
-                                    border: '1px solid rgba(0, 210, 255, 0.4)',
-                                    borderRadius: '8px',
-                                    fontWeight: 600,
-                                    cursor: 'pointer',
-                                    opacity: isProcessing ? 0.5 : 1,
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    gap: '8px',
-                                    transition: 'all 0.2s'
-                                }}
-                            >
-                                <Zap size={16} /> Fill Gaps (Watertight Repair)
-                            </button>
-
-                            {/* Repair threshold sliders */}
-                            {stitchStats && (() => {
-                                const avg = stitchStats.avgEdgeLength;
-                                const fillEdgeMm = (repairEdgeMult * avg).toFixed(2);
-                                const fillEdgeIn = (repairEdgeMult * avg / 25.4).toFixed(3);
-                                const holeDiaMm = (repairHoleMult * avg).toFixed(2);
-                                const holeDiaIn = (repairHoleMult * avg / 25.4).toFixed(3);
-                                return (
-                                    <div style={{ padding: '12px', backgroundColor: 'var(--bg-panel-light)', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-                                        <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginBottom: '10px' }}>
-                                            Avg edge: <strong style={{ color: '#00d2ff' }}>{avg.toFixed(3)} mm</strong> ({(avg / 25.4).toFixed(4)} in)
-                                        </div>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                            <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Max Fill Edge</label>
-                                            <span style={{ fontSize: '12px', color: '#00d2ff', fontWeight: '600' }}>{fillEdgeMm} mm / {fillEdgeIn} in</span>
-                                        </div>
-                                        <input type="range" min="1" max="50" step="1" value={repairEdgeMult}
-                                            onChange={(e) => setRepairEdgeMult(parseFloat(e.target.value))}
-                                            style={{ width: '100%', accentColor: '#00d2ff' }}
-                                        />
-                                        <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px', display: 'flex', justifyContent: 'space-between' }}>
-                                            <span>Max triangle edge for gap fill.</span>
-                                        </div>
-
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', marginTop: '12px' }}>
-                                            <label style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Max Hole Diameter</label>
-                                            <span style={{ fontSize: '12px', color: '#00d2ff', fontWeight: '600' }}>{holeDiaMm} mm / {holeDiaIn} in</span>
-                                        </div>
-                                        <input type="range" min="5" max="100" step="5" value={repairHoleMult}
-                                            onChange={(e) => setRepairHoleMult(parseFloat(e.target.value))}
-                                            style={{ width: '100%', accentColor: '#00d2ff' }}
-                                        />
-                                        <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px', display: 'flex', justifyContent: 'space-between' }}>
-                                            <span>Max hole diameter to fill.</span>
-                                            {analyzedHoles && (
-                                                <span style={{ color: '#00ff00', fontWeight: 'bold' }}>
-                                                    {analyzedHoles.filter(h => h.diameter <= repairHoleMult * avg && h.maxEdge <= repairEdgeMult * avg).length} / {analyzedHoles.length} holes
-                                                </span>
-                                            )}
-                                        </div>
+                                    border: '1px solid rgba(0, 210, 255, 0.2)',
+                                    marginBottom: '16px'
+                                }}>
+                                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px', display: 'flex', justifyContent: 'space-between' }}>
+                                        <span>REPAIR STATUS</span>
+                                        <span style={{ color: '#00d2ff', fontWeight: 'bold' }}>
+                                            {analyzedHoles ? `${analyzedHoles.length} Holes detected` : 'Analyzing...'}
+                                        </span>
                                     </div>
-                                );
-                            })()}
+                                    <p style={{ fontSize: '10px', color: 'var(--text-muted)', fontStyle: 'italic', margin: 0 }}>
+                                        The automatic engine will analyze and close all geometric gaps to ensure the model is watertight for 3D printing.
+                                    </p>
+                                </div>
+                            )}
 
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                                 <p style={{ fontSize: '11px', color: 'var(--text-secondary)', lineHeight: '1.4', margin: 0 }}>
@@ -552,19 +522,21 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                             style={{ width: '100%', accentColor: isHistoryReEdit ? '#ff6b00' : 'var(--accent-primary)' }}
                                         />
                                     </div>
-                                    <button onClick={handleApply} disabled={isProcessing} style={{
-                                        width: '100%', padding: '10px',
-                                        backgroundColor: isHistoryReEdit ? '#ff6b00' : 'var(--accent-primary)',
-                                        color: 'white', borderRadius: 'var(--radius-sm)',
-                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                        gap: '8px', fontSize: '13px', border: 'none',
-                                        cursor: isProcessing ? 'not-allowed' : 'pointer',
-                                        fontWeight: 'bold',
-                                        opacity: isProcessing ? 0.6 : 1
-                                    }}>
-                                        {isHistoryReEdit ? <RotateCcw size={14} /> : <Scissors size={14} />}
-                                        {isHistoryReEdit ? 'Recalculate & Reprocess' : 'Apply Subdivision'}
-                                    </button>
+                                    <Tooltip content="Apply Loop Subdivision to selected faces" icon={<Scissors size={12} />} align="left">
+                                        <button onClick={handleApply} disabled={isProcessing} style={{
+                                            width: '100%', padding: '10px',
+                                            backgroundColor: isHistoryReEdit ? '#ff6b00' : 'var(--accent-primary)',
+                                            color: 'white', borderRadius: 'var(--radius-sm)',
+                                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                            gap: '8px', fontSize: '13px', border: 'none',
+                                            cursor: isProcessing ? 'not-allowed' : 'pointer',
+                                            fontWeight: 'bold',
+                                            opacity: isProcessing ? 0.6 : 1
+                                        }}>
+                                            {isHistoryReEdit ? <RotateCcw size={14} /> : <Scissors size={14} />}
+                                            {isHistoryReEdit ? 'Recalculate & Reprocess' : 'Apply Subdivision'}
+                                        </button>
+                                    </Tooltip>
                                 </div>
                             )}
 
@@ -861,17 +833,19 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                             </div>
                                         )}
 
-                                        <button onClick={handleApply} disabled={isProcessing} style={{
-                                            width: '100%', padding: '12px',
-                                            backgroundColor: isHistoryReEdit ? '#00d2ff' : 'var(--accent-primary)',
-                                            color: 'white', border: 'none', borderRadius: 'var(--radius-sm)',
-                                            cursor: isProcessing ? 'not-allowed' : 'pointer',
-                                            fontWeight: 'bold', fontSize: '13px', marginTop: '16px',
-                                            opacity: isProcessing ? 0.6 : 1
-                                        }}>
-                                            {isHistoryReEdit ? <RotateCcw size={14} style={{ marginRight: '8px' }} /> : null}
-                                            {isHistoryReEdit ? 'Recalculate & Redo' : 'Apply Texture'}
-                                        </button>
+                                        <Tooltip content="Bake texture into mesh geometry" icon={<Grid3X3 size={12} />} align="left">
+                                            <button onClick={handleApply} disabled={isProcessing} style={{
+                                                width: '100%', padding: '12px',
+                                                backgroundColor: isHistoryReEdit ? '#00d2ff' : 'var(--accent-primary)',
+                                                color: 'white', border: 'none', borderRadius: 'var(--radius-sm)',
+                                                cursor: isProcessing ? 'not-allowed' : 'pointer',
+                                                fontWeight: 'bold', fontSize: '13px', marginTop: '16px',
+                                                opacity: isProcessing ? 0.6 : 1
+                                            }}>
+                                                {isHistoryReEdit ? <RotateCcw size={14} style={{ marginRight: '8px' }} /> : null}
+                                                {isHistoryReEdit ? 'Recalculate & Redo' : 'Apply Texture'}
+                                            </button>
+                                        </Tooltip>
                                     </div>
                                 </div>
                             )}

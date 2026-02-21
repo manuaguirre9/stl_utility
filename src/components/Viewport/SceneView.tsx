@@ -1,6 +1,8 @@
 import React, { Suspense, useState } from 'react';
+import { Tooltip } from '../UI/Tooltip';
+import { Layers, Box } from 'lucide-react';
 import { Canvas } from '@react-three/fiber';
-import { OrbitControls, Grid, GizmoHelper, GizmoViewport, Bounds } from '@react-three/drei';
+import { OrbitControls, Grid, GizmoHelper, GizmoViewport, Bounds, Line } from '@react-three/drei';
 import { useStore } from '../../store/useStore';
 import * as THREE from 'three';
 import { generateSelectionGeometry, segmentMesh, generateClassificationGeometry } from '../../utils/selectionUtils';
@@ -20,6 +22,7 @@ const Model = ({ model }: { model: any }) => {
     const removeSelection = useStore((state) => state.removeFromSmartSelection);
     const selection = useStore((state) => state.smartSelection[model.id] || EMPTY_ARRAY);
     const boundaryEdges = useStore((state) => state.boundaryEdges[model.id]);
+    const nonManifoldEdges = useStore((state) => state.nonManifoldEdges[model.id]);
     const fillableEdges = useStore((state) => state.fillableEdges[model.id]);
     const unfillableEdges = useStore((state) => state.unfillableEdges[model.id]);
 
@@ -167,6 +170,13 @@ const Model = ({ model }: { model: any }) => {
         return geo;
     }, [boundaryEdges]);
 
+    const nonManifoldGeo = React.useMemo(() => {
+        if (!nonManifoldEdges) return null;
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(nonManifoldEdges, 3));
+        return geo;
+    }, [nonManifoldEdges]);
+
     // Live preview for mesh repair tools (watertight fill)
     const fillableGeo = React.useMemo(() => {
         if (!fillableEdges) return null;
@@ -264,29 +274,41 @@ const Model = ({ model }: { model: any }) => {
                     <lineBasicMaterial color="#000000" />
                 </lineSegments>
             )}
-            {boundaryGeo && !fillableGeo && !unfillableGeo && (
-                <lineSegments
-                    geometry={boundaryGeo}
-                    renderOrder={4}
-                >
-                    <lineBasicMaterial color="#ff6b00" linewidth={2} depthTest={false} />
-                </lineSegments>
+            {boundaryGeo && !fillableGeo && !unfillableGeo && boundaryEdges && boundaryEdges.length >= 6 && (
+                <Line
+                    points={Array.from(boundaryEdges)}
+                    color="#ff6b00"
+                    lineWidth={5}
+                    depthTest={false}
+                    transparent
+                />
             )}
-            {fillableGeo && (
-                <lineSegments
-                    geometry={fillableGeo}
-                    renderOrder={4}
-                >
-                    <lineBasicMaterial color="#00ff00" linewidth={3} depthTest={false} />
-                </lineSegments>
+            {nonManifoldGeo && nonManifoldEdges && nonManifoldEdges.length >= 6 && (
+                <Line
+                    points={Array.from(nonManifoldEdges)}
+                    color="#cc00ff"
+                    lineWidth={8}
+                    depthTest={false}
+                    transparent
+                />
             )}
-            {unfillableGeo && (
-                <lineSegments
-                    geometry={unfillableGeo}
-                    renderOrder={4}
-                >
-                    <lineBasicMaterial color="#ff0000" linewidth={2} depthTest={false} opacity={0.5} transparent />
-                </lineSegments>
+            {fillableGeo && fillableEdges && fillableEdges.length >= 6 && (
+                <Line
+                    points={Array.from(fillableEdges)}
+                    color="#ddff00"
+                    lineWidth={6}
+                    depthTest={false}
+                    transparent
+                />
+            )}
+            {unfillableGeo && unfillableEdges && unfillableEdges.length >= 6 && (
+                <Line
+                    points={Array.from(unfillableEdges)}
+                    color="#ff3300"
+                    lineWidth={8}
+                    depthTest={false}
+                    transparent
+                />
             )}
         </mesh>
     );
@@ -552,6 +574,43 @@ export const SceneView: React.FC = () => {
                 </div>
             )}
 
+            {transformMode === 'stitching' && (
+                <div style={{
+                    position: 'absolute',
+                    bottom: isMobile ? '60px' : '80px',
+                    right: '20px',
+                    backgroundColor: 'rgba(20, 20, 20, 0.85)',
+                    backdropFilter: 'blur(8px)',
+                    padding: '12px',
+                    borderRadius: '8px',
+                    border: '1px solid var(--border-color)',
+                    zIndex: 100,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '8px',
+                    fontSize: '11px',
+                    color: 'var(--text-secondary)'
+                }}>
+                    <strong style={{ color: '#fff', marginBottom: '4px' }}>Repair Diagnostics</strong>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <div style={{ width: '12px', height: '4px', backgroundColor: '#00ff00', borderRadius: '2px' }} />
+                        <span>Ready to Repair (Safe)</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <div style={{ width: '12px', height: '4px', backgroundColor: '#ff6b00', borderRadius: '2px' }} />
+                        <span>Raw Open Boundary</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <div style={{ width: '12px', height: '4px', backgroundColor: '#cc00ff', borderRadius: '2px' }} />
+                        <span>Non-Manifold Geometry</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <div style={{ width: '12px', height: '4px', backgroundColor: '#ff3300', borderRadius: '2px' }} />
+                        <span>Too Large / Complex</span>
+                    </div>
+                </div>
+            )}
+
             {/* Bottom View Controls Overlay */}
             <div style={{
                 position: 'absolute',
@@ -570,65 +629,76 @@ export const SceneView: React.FC = () => {
                 overflowX: 'auto',
                 scrollbarWidth: 'none'
             }}>
+
                 {(isMobile ? ['Front', 'Top', 'Right'] : ['Perspective', 'Front', 'Top', 'Right']).map(view => (
+                    <Tooltip key={view} content={`${view} View`}>
+                        <button
+                            onClick={() => setView(view)}
+                            style={{
+                                padding: isMobile ? '4px 8px' : '4px 12px',
+                                borderRadius: 'var(--radius-sm)',
+                                fontSize: isMobile ? '10px' : '12px',
+                                backgroundColor: 'transparent',
+                                color: 'var(--text-primary)',
+                                border: '1px solid var(--border-color)',
+                                whiteSpace: 'nowrap'
+                            }}
+                        >
+                            {view}
+                        </button>
+                    </Tooltip>
+                ))}
+                <div style={{ width: '1px', backgroundColor: 'var(--border-color)', margin: '0 4px' }} />
+
+                <Tooltip content="Toggle Wireframe Overlay" icon={<Box size={12} />}>
                     <button
-                        key={view}
-                        onClick={() => setView(view)}
+                        onClick={toggleShowMesh}
                         style={{
                             padding: isMobile ? '4px 8px' : '4px 12px',
                             borderRadius: 'var(--radius-sm)',
                             fontSize: isMobile ? '10px' : '12px',
-                            backgroundColor: 'transparent',
-                            color: 'var(--text-primary)',
                             border: '1px solid var(--border-color)',
-                            whiteSpace: 'nowrap'
+                            color: showMesh ? '#fff' : 'var(--text-primary)',
+                            backgroundColor: showMesh ? 'var(--accent-primary)' : 'transparent',
                         }}
                     >
-                        {view}
+                        Mesh
                     </button>
-                ))}
-                <div style={{ width: '1px', backgroundColor: 'var(--border-color)', margin: '0 4px' }} />
-                <button
-                    onClick={toggleShowMesh}
-                    style={{
-                        padding: isMobile ? '4px 8px' : '4px 12px',
-                        borderRadius: 'var(--radius-sm)',
-                        fontSize: isMobile ? '10px' : '12px',
-                        border: '1px solid var(--border-color)',
-                        color: showMesh ? '#fff' : 'var(--text-primary)',
-                        backgroundColor: showMesh ? 'var(--accent-primary)' : 'transparent',
-                    }}
-                >
-                    Mesh
-                </button>
-                <button
-                    onClick={toggleShowEdges}
-                    style={{
-                        padding: isMobile ? '4px 8px' : '4px 12px',
-                        borderRadius: 'var(--radius-sm)',
-                        fontSize: isMobile ? '10px' : '12px',
-                        border: '1px solid var(--border-color)',
-                        color: showEdges ? '#fff' : 'var(--text-primary)',
-                        backgroundColor: showEdges ? 'var(--accent-primary)' : 'transparent',
-                    }}
-                >
-                    Edges
-                </button>
-                <button
-                    onClick={toggleClassification}
-                    style={{
-                        padding: isMobile ? '4px 8px' : '4px 12px',
-                        borderRadius: 'var(--radius-sm)',
-                        fontSize: isMobile ? '10px' : '12px',
-                        border: '1px solid var(--border-color)',
-                        color: showClassification ? '#fff' : 'var(--text-primary)',
-                        backgroundColor: showClassification ? 'var(--accent-primary)' : 'transparent',
-                    }}
-                >
-                    Analysis
-                </button>
+                </Tooltip>
+
+                <Tooltip content="Toggle Feature Edges" icon={<Layers size={12} />}>
+                    <button
+                        onClick={toggleShowEdges}
+                        style={{
+                            padding: isMobile ? '4px 8px' : '4px 12px',
+                            borderRadius: 'var(--radius-sm)',
+                            fontSize: isMobile ? '10px' : '12px',
+                            border: '1px solid var(--border-color)',
+                            color: showEdges ? '#fff' : 'var(--text-primary)',
+                            backgroundColor: showEdges ? 'var(--accent-primary)' : 'transparent',
+                        }}
+                    >
+                        Edges
+                    </button>
+                </Tooltip>
+
+                <Tooltip content="Toggle Surface Analysis (Type Detection)" icon={<Info size={12} />}>
+                    <button
+                        onClick={toggleClassification}
+                        style={{
+                            padding: isMobile ? '4px 8px' : '4px 12px',
+                            borderRadius: 'var(--radius-sm)',
+                            fontSize: isMobile ? '10px' : '12px',
+                            border: '1px solid var(--border-color)',
+                            color: showClassification ? '#fff' : 'var(--text-primary)',
+                            backgroundColor: showClassification ? 'var(--accent-primary)' : 'transparent',
+                        }}
+                    >
+                        Analysis
+                    </button>
+                </Tooltip>
             </div>
-        </div>
+        </div >
     );
 };
 

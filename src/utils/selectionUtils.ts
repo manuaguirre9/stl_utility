@@ -5,8 +5,8 @@ import * as THREE from 'three';
 // Returns map: faceIndex -> array of neighbor faceIndices (Shared Edge)
 export const buildAdjacencyGraph = (geometry: THREE.BufferGeometry, precision = 1e-3) => {
     const position = geometry.attributes.position;
-    const vertexCount = position.count;
-    const faceCount = vertexCount / 3;
+    const index = geometry.index;
+    const faceCount = index ? index.count / 3 : position.count / 3;
 
     // Map vertex hash to list of faces sharing it
     const vertexToFaces = new Map<string, number[]>();
@@ -21,8 +21,8 @@ export const buildAdjacencyGraph = (geometry: THREE.BufferGeometry, precision = 
 
     for (let f = 0; f < faceCount; f++) {
         for (let v = 0; v < 3; v++) {
-            const idx = f * 3 + v;
-            const h = hash(position.getX(idx), position.getY(idx), position.getZ(idx));
+            const vIdx = index ? index.getX(f * 3 + v) : f * 3 + v;
+            const h = hash(position.getX(vIdx), position.getY(vIdx), position.getZ(vIdx));
 
             let faces = vertexToFaces.get(h);
             if (!faces) {
@@ -75,7 +75,8 @@ export const getConnectedFaces = (
     if (!geometry.attributes.normal) geometry.computeVertexNormals();
 
     const pos = geometry.attributes.position;
-    const faceCount = pos.count / 3;
+    const index = geometry.index;
+    const faceCount = index ? index.count / 3 : pos.count / 3;
     const normals: THREE.Vector3[] = [];
 
     // Precalculate normals for each face (triangle)
@@ -83,9 +84,13 @@ export const getConnectedFaces = (
     const cb = new THREE.Vector3(), ab = new THREE.Vector3();
 
     for (let f = 0; f < faceCount; f++) {
-        pA.fromBufferAttribute(pos, f * 3 + 0);
-        pB.fromBufferAttribute(pos, f * 3 + 1);
-        pC.fromBufferAttribute(pos, f * 3 + 2);
+        const vA_idx = index ? index.getX(f * 3 + 0) : f * 3 + 0;
+        const vB_idx = index ? index.getX(f * 3 + 1) : f * 3 + 1;
+        const vC_idx = index ? index.getX(f * 3 + 2) : f * 3 + 2;
+
+        pA.fromBufferAttribute(pos, vA_idx);
+        pB.fromBufferAttribute(pos, vB_idx);
+        pC.fromBufferAttribute(pos, vC_idx);
         cb.subVectors(pC, pB);
         ab.subVectors(pA, pB);
         cb.cross(ab).normalize();
@@ -229,7 +234,8 @@ export const getConnectedFaces = (
                 }
             } else if (isCylinder) {
                 // Cylinder Expansion (Radius check)
-                const pN = new THREE.Vector3().fromBufferAttribute(pos, neighbor * 3);
+                const vA_idx = index ? index.getX(neighbor * 3 + 0) : neighbor * 3 + 0;
+                const pN = new THREE.Vector3().fromBufferAttribute(pos, vA_idx);
                 const axisL = new THREE.Line3(bestAxisPoint, bestAxisPoint.clone().add(bestAxis));
                 const closeP = new THREE.Vector3();
                 axisL.closestPointToPoint(pN, false, closeP);
@@ -346,6 +352,7 @@ export const getPatchClassification = (
     if (faceIndices.length < 3) return 'generic';
 
     const pos = geometry.attributes.position;
+    const index = geometry.index;
     const patchNormals: THREE.Vector3[] = faceIndices.map(idx => normals[idx]);
 
     // Perform PCA on Normals
@@ -366,9 +373,12 @@ export const getPatchClassification = (
 
         faceIndices.forEach(idx => {
             const nProj = normals[idx].clone().projectOnPlane(axis).normalize();
-            const vA = new THREE.Vector3().fromBufferAttribute(pos, idx * 3 + 0);
-            const vB = new THREE.Vector3().fromBufferAttribute(pos, idx * 3 + 1);
-            const vC = new THREE.Vector3().fromBufferAttribute(pos, idx * 3 + 2);
+            const vA_idx = index ? index.getX(idx * 3 + 0) : idx * 3 + 0;
+            const vB_idx = index ? index.getX(idx * 3 + 1) : idx * 3 + 1;
+            const vC_idx = index ? index.getX(idx * 3 + 2) : idx * 3 + 2;
+            const vA = new THREE.Vector3().fromBufferAttribute(pos, vA_idx);
+            const vB = new THREE.Vector3().fromBufferAttribute(pos, vB_idx);
+            const vC = new THREE.Vector3().fromBufferAttribute(pos, vC_idx);
             const q = new THREE.Vector3().add(vA).add(vB).add(vC).divideScalar(3);
 
             const mat = [1 - nProj.x * nProj.x, -nProj.x * nProj.y, -nProj.x * nProj.z, -nProj.y * nProj.x, 1 - nProj.y * nProj.y, -nProj.y * nProj.z, -nProj.z * nProj.x, -nProj.z * nProj.y, 1 - nProj.z * nProj.z];
@@ -383,7 +393,10 @@ export const getPatchClassification = (
             bestAxisPoint.y = (-(sXY * sZZ - sYZ * sXZ) * bX + (sXX * sZZ - sXZ * sXZ) * bY - (sXX * sYZ - sXY * sXZ) * bZ) / det;
             bestAxisPoint.z = ((sXY * sYZ - sYY * sXZ) * bX - (sXX * sYZ - sXY * sXZ) * bY + (sXX * sYY - sXY * sXY) * bZ) / det;
         } else {
-            faceIndices.forEach(idx => bestAxisPoint.add(new THREE.Vector3().fromBufferAttribute(pos, idx * 3)));
+            faceIndices.forEach(idx => {
+                const vA_idx = index ? index.getX(idx * 3 + 0) : idx * 3 + 0;
+                bestAxisPoint.add(new THREE.Vector3().fromBufferAttribute(pos, vA_idx));
+            });
             bestAxisPoint.divideScalar(faceIndices.length);
         }
 
@@ -392,7 +405,10 @@ export const getPatchClassification = (
         const p = new THREE.Vector3(), proj = new THREE.Vector3(), vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3();
 
         faceIndices.forEach(idx => {
-            vA.fromBufferAttribute(pos, idx * 3 + 0); vB.fromBufferAttribute(pos, idx * 3 + 1); vC.fromBufferAttribute(pos, idx * 3 + 2);
+            const vA_idx = index ? index.getX(idx * 3 + 0) : idx * 3 + 0;
+            const vB_idx = index ? index.getX(idx * 3 + 1) : idx * 3 + 1;
+            const vC_idx = index ? index.getX(idx * 3 + 2) : idx * 3 + 2;
+            vA.fromBufferAttribute(pos, vA_idx); vB.fromBufferAttribute(pos, vB_idx); vC.fromBufferAttribute(pos, vC_idx);
             p.set(0, 0, 0).add(vA).add(vB).add(vC).divideScalar(3);
             axisLine.closestPointToPoint(p, false, proj);
             radii.push(p.distanceTo(proj)); heights.push(p.dot(axis));
@@ -428,7 +444,8 @@ export const getPatchClassification = (
  * Uses a strict visitation pattern to ensure 100% coverage without overlaps.
  */
 export const segmentMesh = (geometry: THREE.BufferGeometry, angle: number = 20, adjacency?: number[][]) => {
-    const faceCount = geometry.attributes.position.count / 3;
+    const index = geometry.index;
+    const faceCount = index ? index.count / 3 : geometry.attributes.position.count / 3;
     const graph = adjacency || buildAdjacencyGraph(geometry);
 
     // Pre-calculate normals
@@ -438,9 +455,13 @@ export const segmentMesh = (geometry: THREE.BufferGeometry, angle: number = 20, 
     const cb = new THREE.Vector3(), ab = new THREE.Vector3();
 
     for (let f = 0; f < faceCount; f++) {
-        pA.fromBufferAttribute(pos, f * 3 + 0);
-        pB.fromBufferAttribute(pos, f * 3 + 1);
-        pC.fromBufferAttribute(pos, f * 3 + 2);
+        const vA_idx = index ? index.getX(f * 3 + 0) : f * 3 + 0;
+        const vB_idx = index ? index.getX(f * 3 + 1) : f * 3 + 1;
+        const vC_idx = index ? index.getX(f * 3 + 2) : f * 3 + 2;
+
+        pA.fromBufferAttribute(pos, vA_idx);
+        pB.fromBufferAttribute(pos, vB_idx);
+        pC.fromBufferAttribute(pos, vC_idx);
         cb.subVectors(pC, pB);
         ab.subVectors(pA, pB);
         cb.cross(ab).normalize();
@@ -555,6 +576,7 @@ const getPatchDetailedStats = (geometry: THREE.BufferGeometry, faceIndices: numb
     if (type === 'generic' || type === 'plane') return { type };
 
     const pos = geometry.attributes.position;
+    const index = geometry.index;
     const patchNormals = faceIndices.map(idx => normals[idx]);
     const pca = computeNormalPCA(patchNormals);
     const axis = pca.vectors[0];
@@ -562,7 +584,8 @@ const getPatchDetailedStats = (geometry: THREE.BufferGeometry, faceIndices: numb
     let sXX = 0, sXY = 0, sXZ = 0, sYY = 0, sYZ = 0, sZZ = 0, bX = 0, bY = 0, bZ = 0;
     faceIndices.forEach(idx => {
         const nProj = normals[idx].clone().projectOnPlane(axis).normalize();
-        const q = new THREE.Vector3().fromBufferAttribute(pos, idx * 3);
+        const vA_idx = index ? index.getX(idx * 3 + 0) : idx * 3 + 0;
+        const q = new THREE.Vector3().fromBufferAttribute(pos, vA_idx);
         const mat = [1 - nProj.x * nProj.x, -nProj.x * nProj.y, -nProj.x * nProj.z, -nProj.y * nProj.x, 1 - nProj.y * nProj.y, -nProj.y * nProj.z, -nProj.z * nProj.x, -nProj.z * nProj.y, 1 - nProj.z * nProj.z];
         sXX += mat[0]; sXY += mat[1]; sXZ += mat[2]; sYY += mat[4]; sYZ += mat[5]; sZZ += mat[8];
         bX += mat[0] * q.x + mat[1] * q.y + mat[2] * q.z; bY += mat[3] * q.x + mat[4] * q.y + mat[5] * q.z; bZ += mat[6] * q.x + mat[7] * q.y + mat[8] * q.z;
@@ -574,7 +597,10 @@ const getPatchDetailedStats = (geometry: THREE.BufferGeometry, faceIndices: numb
         center.y = (-(sXY * sZZ - sYZ * sXZ) * bX + (sXX * sZZ - sXZ * sXZ) * bY - (sXX * sYZ - sXY * sXZ) * bZ) / det;
         center.z = ((sXY * sYZ - sYY * sXZ) * bX - (sXX * sYZ - sXY * sXZ) * bY + (sXX * sYY - sXY * sXY) * bZ) / det;
     } else {
-        faceIndices.forEach(idx => center.add(new THREE.Vector3().fromBufferAttribute(pos, idx * 3)));
+        faceIndices.forEach(idx => {
+            const vA_idx = index ? index.getX(idx * 3 + 0) : idx * 3 + 0;
+            center.add(new THREE.Vector3().fromBufferAttribute(pos, vA_idx));
+        });
         center.divideScalar(faceIndices.length);
     }
     let radiusSum = 0;
@@ -582,9 +608,12 @@ const getPatchDetailedStats = (geometry: THREE.BufferGeometry, faceIndices: numb
     const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3(), p = new THREE.Vector3();
 
     faceIndices.forEach(idx => {
-        vA.fromBufferAttribute(pos, idx * 3 + 0);
-        vB.fromBufferAttribute(pos, idx * 3 + 1);
-        vC.fromBufferAttribute(pos, idx * 3 + 2);
+        const vA_idx = index ? index.getX(idx * 3 + 0) : idx * 3 + 0;
+        const vB_idx = index ? index.getX(idx * 3 + 1) : idx * 3 + 1;
+        const vC_idx = index ? index.getX(idx * 3 + 2) : idx * 3 + 2;
+        vA.fromBufferAttribute(pos, vA_idx);
+        vB.fromBufferAttribute(pos, vB_idx);
+        vC.fromBufferAttribute(pos, vC_idx);
         p.set(0, 0, 0).add(vA).add(vB).add(vC).divideScalar(3);
 
         const proj = new THREE.Vector3();
@@ -604,7 +633,8 @@ export const generateClassificationGeometry = (
 ) => {
     const classificationGeometry = new THREE.BufferGeometry();
     const pos = geometry.attributes.position;
-    const faceCount = pos.count / 3;
+    const index = geometry.index;
+    const faceCount = index ? index.count / 3 : pos.count / 3;
     const selectionSet = new Set(selection);
 
     const newPos = new Float32Array(faceCount * 9);
@@ -625,13 +655,12 @@ export const generateClassificationGeometry = (
             const isSelected = selectionSet.has(faceIdx);
             const color = isSelected ? highlightColor : baseColor;
 
-            const vA = faceIdx * 3;
             for (let v = 0; v < 3; v++) {
-                const idx = vA + v;
+                const vIdx = index ? index.getX(faceIdx * 3 + v) : faceIdx * 3 + v;
                 const outIdx = vertexOffset * 3;
-                newPos[outIdx + 0] = pos.getX(idx);
-                newPos[outIdx + 1] = pos.getY(idx);
-                newPos[outIdx + 2] = pos.getZ(idx);
+                newPos[outIdx + 0] = pos.getX(vIdx);
+                newPos[outIdx + 1] = pos.getY(vIdx);
+                newPos[outIdx + 2] = pos.getZ(vIdx);
 
                 newColors[outIdx + 0] = color.r;
                 newColors[outIdx + 1] = color.g;
@@ -651,22 +680,26 @@ export const generateClassificationGeometry = (
 export const generateSelectionGeometry = (originalGeometry: THREE.BufferGeometry, faceIndices: number[]) => {
     const selectedGeometry = new THREE.BufferGeometry();
     const pos = originalGeometry.attributes.position;
+    const index = originalGeometry.index;
 
     const newPos = new Float32Array(faceIndices.length * 9); // 3 vertices * 3 coords
 
     faceIndices.forEach((faceIdx, i) => {
-        const vA = faceIdx * 3;
-        newPos[i * 9 + 0] = pos.getX(vA);
-        newPos[i * 9 + 1] = pos.getY(vA);
-        newPos[i * 9 + 2] = pos.getZ(vA);
+        const vA_idx = index ? index.getX(faceIdx * 3 + 0) : faceIdx * 3 + 0;
+        const vB_idx = index ? index.getX(faceIdx * 3 + 1) : faceIdx * 3 + 1;
+        const vC_idx = index ? index.getX(faceIdx * 3 + 2) : faceIdx * 3 + 2;
 
-        newPos[i * 9 + 3] = pos.getX(vA + 1);
-        newPos[i * 9 + 4] = pos.getY(vA + 1);
-        newPos[i * 9 + 5] = pos.getZ(vA + 1);
+        newPos[i * 9 + 0] = pos.getX(vA_idx);
+        newPos[i * 9 + 1] = pos.getY(vA_idx);
+        newPos[i * 9 + 2] = pos.getZ(vA_idx);
 
-        newPos[i * 9 + 6] = pos.getX(vA + 2);
-        newPos[i * 9 + 7] = pos.getY(vA + 2);
-        newPos[i * 9 + 8] = pos.getZ(vA + 2);
+        newPos[i * 9 + 3] = pos.getX(vB_idx);
+        newPos[i * 9 + 4] = pos.getY(vB_idx);
+        newPos[i * 9 + 5] = pos.getZ(vB_idx);
+
+        newPos[i * 9 + 6] = pos.getX(vC_idx);
+        newPos[i * 9 + 7] = pos.getY(vC_idx);
+        newPos[i * 9 + 8] = pos.getZ(vC_idx);
     });
 
     selectedGeometry.setAttribute('position', new THREE.BufferAttribute(newPos, 3));

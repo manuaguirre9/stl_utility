@@ -18,6 +18,7 @@ import {
     Redo2,
     Trash2
 } from 'lucide-react';
+import { Tooltip } from '../UI/Tooltip';
 
 const getIconForAction = (label: string) => {
     const l = label.toLowerCase();
@@ -82,7 +83,6 @@ export const HistoryTimeline: React.FC = () => {
     };
 
     const [isDragging, setIsDragging] = useState(false);
-    const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
     const timelineContainerRef = useRef<HTMLDivElement>(null);
 
     const itemWidth = isMobile ? 32 : 28;
@@ -92,13 +92,11 @@ export const HistoryTimeline: React.FC = () => {
     const handleScrub = (clientX: number) => {
         if (!timelineContainerRef.current) return;
         const rect = timelineContainerRef.current.getBoundingClientRect();
-        // Mouse position relative to the scrollable content
         const x = clientX - rect.left + timelineContainerRef.current.scrollLeft;
 
         let targetIndex = 0;
         let minDistance = Infinity;
 
-        // The goal is to snap to the midpoint between icons
         for (let i = 0; i < history.length; i++) {
             const midGap = padding + (i * (itemWidth + gap)) + itemWidth + gap / 2;
             const dist = Math.abs(x - midGap);
@@ -115,7 +113,6 @@ export const HistoryTimeline: React.FC = () => {
     };
 
     const handleContainerMouseDown = () => {
-        // Only trigger drag if clicking the track area, not icons
         setIsDragging(true);
     };
 
@@ -151,23 +148,34 @@ export const HistoryTimeline: React.FC = () => {
                 gap: '2px',
                 paddingRight: isMobile ? '8px' : '15px',
                 borderRight: '1px solid var(--border-color)',
-                height: '70%'
+                height: '70%',
+                flexShrink: 0
             }}>
-                <button onClick={() => { stopPlayback(); jumpToHistory(0); }} style={controlButtonStyle} title="Rewind">
-                    <SkipBack size={16} />
-                </button>
-                <button onClick={() => { stopPlayback(); jumpToHistory(Math.max(0, historyIndex - 1)); }} disabled={historyIndex === 0} style={controlButtonStyle} title="Previous">
-                    <ChevronLeft size={18} />
-                </button>
-                <button onClick={() => setIsPlaying(!isPlaying)} style={{ ...controlButtonStyle, backgroundColor: isPlaying ? 'var(--accent-primary)' : 'var(--bg-input)', color: isPlaying ? 'white' : 'var(--text-primary)' }}>
-                    {isPlaying ? <Pause size={18} /> : <Play size={18} />}
-                </button>
-                <button onClick={() => { stopPlayback(); redo(); }} disabled={historyIndex === history.length - 1} style={controlButtonStyle} title="Next">
-                    <ChevronRight size={18} />
-                </button>
-                <button onClick={() => { stopPlayback(); jumpToHistory(history.length - 1); }} style={controlButtonStyle} title="Fast Forward">
-                    <SkipForward size={16} />
-                </button>
+                <Tooltip content="Rewind" icon={<SkipBack size={12} />}>
+                    <button onClick={() => { stopPlayback(); jumpToHistory(0); }} style={controlButtonStyle}>
+                        <SkipBack size={16} />
+                    </button>
+                </Tooltip>
+                <Tooltip content="Previous" icon={<ChevronLeft size={12} />}>
+                    <button onClick={() => { stopPlayback(); jumpToHistory(Math.max(0, historyIndex - 1)); }} disabled={historyIndex === 0} style={controlButtonStyle}>
+                        <ChevronLeft size={18} />
+                    </button>
+                </Tooltip>
+                <Tooltip content={isPlaying ? "Pause" : "Play"} icon={isPlaying ? <Pause size={12} /> : <Play size={12} />}>
+                    <button onClick={() => setIsPlaying(!isPlaying)} style={{ ...controlButtonStyle, backgroundColor: isPlaying ? 'var(--accent-primary)' : 'var(--bg-input)', color: isPlaying ? 'white' : 'var(--text-primary)' }}>
+                        {isPlaying ? <Pause size={18} /> : <Play size={18} />}
+                    </button>
+                </Tooltip>
+                <Tooltip content="Next" icon={<ChevronRight size={12} />}>
+                    <button onClick={() => { stopPlayback(); redo(); }} disabled={historyIndex === history.length - 1} style={controlButtonStyle}>
+                        <ChevronRight size={18} />
+                    </button>
+                </Tooltip>
+                <Tooltip content="Fast Forward" icon={<SkipForward size={12} />}>
+                    <button onClick={() => { stopPlayback(); jumpToHistory(history.length - 1); }} style={controlButtonStyle}>
+                        <SkipForward size={16} />
+                    </button>
+                </Tooltip>
             </div>
 
             {/* Timeline Area (Drag to Scrub) */}
@@ -195,37 +203,32 @@ export const HistoryTimeline: React.FC = () => {
                     const isPreviewed = historyPreviewId === entry.id;
 
                     return (
-                        <div
-                            key={entry.id}
-                            onMouseEnter={(e) => {
-                                setHistoryPreviewId(entry.id);
-                                setMousePos({ x: e.clientX, y: e.clientY });
-                            }}
-                            onMouseMove={(e) => {
-                                setMousePos({ x: e.clientX, y: e.clientY });
-                            }}
-                            onMouseLeave={() => setHistoryPreviewId(null)}
-                            onDoubleClick={(e) => { e.stopPropagation(); reEditHistoryItem(index); }}
-                            onClick={(e) => handleItemSelection(index, entry.id, e)}
-                            style={{
-                                minWidth: `${itemWidth}px`,
-                                height: `${itemWidth}px`,
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                backgroundColor: isSelected ? 'var(--accent-primary)' : (isPreviewed ? 'rgba(255, 204, 0, 0.3)' : 'var(--bg-input)'),
-                                borderRadius: 'var(--radius-sm)',
-                                color: isSelected ? 'white' : (isFuture ? 'var(--text-muted)' : 'var(--text-primary)'),
-                                border: isSelected ? (isActive ? '2px solid white' : '2px solid rgba(255,255,255,0.5)') : (isPreviewed ? '1px solid #ffcc00' : '1px solid var(--border-color)'),
-                                opacity: isFuture ? 0.3 : 1,
-                                transition: 'all 0.15s ease',
-                                flexShrink: 0,
-                                zIndex: 1,
-                                cursor: 'pointer'
-                            }}
-                        >
-                            {getIconForAction(entry.label)}
-                        </div>
+                        <Tooltip key={entry.id} content={entry.label} icon={getIconForAction(entry.label)}>
+                            <div
+                                onMouseEnter={() => setHistoryPreviewId(entry.id)}
+                                onMouseLeave={() => setHistoryPreviewId(null)}
+                                onDoubleClick={(e) => { e.stopPropagation(); reEditHistoryItem(index); }}
+                                onClick={(e) => handleItemSelection(index, entry.id, e)}
+                                style={{
+                                    minWidth: `${itemWidth}px`,
+                                    height: `${itemWidth}px`,
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    backgroundColor: isSelected ? 'var(--accent-primary)' : (isPreviewed ? 'rgba(255, 204, 0, 0.3)' : 'var(--bg-input)'),
+                                    borderRadius: 'var(--radius-sm)',
+                                    color: isSelected ? 'white' : (isFuture ? 'var(--text-muted)' : 'var(--text-primary)'),
+                                    border: isSelected ? (isActive ? '2px solid white' : '2px solid rgba(255,255,255,0.5)') : (isPreviewed ? '1px solid #ffcc00' : '1px solid var(--border-color)'),
+                                    opacity: isFuture ? 0.3 : 1,
+                                    transition: 'all 0.15s ease',
+                                    flexShrink: 0,
+                                    zIndex: 1,
+                                    cursor: 'pointer'
+                                }}
+                            >
+                                {getIconForAction(entry.label)}
+                            </div>
+                        </Tooltip>
                     );
                 })}
 
@@ -253,50 +256,27 @@ export const HistoryTimeline: React.FC = () => {
                 paddingLeft: isMobile ? '8px' : '15px',
                 borderLeft: '1px solid var(--border-color)',
                 height: '70%',
-                alignItems: 'center'
+                alignItems: 'center',
+                flexShrink: 0
             }}>
                 {selectedHistoryIds.length > 1 && (
-                    <button onClick={() => deleteHistoryEntry(selectedHistoryIds)} style={{ ...iconOnlyBtnStyle, backgroundColor: '#ff4444', color: 'white', borderColor: '#ff4444' }}>
-                        <Trash2 size={12} />
-                    </button>
+                    <Tooltip content="Delete Selected">
+                        <button onClick={() => deleteHistoryEntry(selectedHistoryIds)} style={{ ...iconOnlyBtnStyle, backgroundColor: '#ff4444', color: 'white', borderColor: '#ff4444' }}>
+                            <Trash2 size={12} />
+                        </button>
+                    </Tooltip>
                 )}
-                <button onClick={undo} disabled={historyIndex === 0} style={iconOnlyBtnStyle}>
-                    <Undo2 size={14} />
-                </button>
-                <button onClick={redo} disabled={historyIndex === history.length - 1} style={iconOnlyBtnStyle}>
-                    <Redo2 size={14} />
-                </button>
+                <Tooltip content="Undo (Ctrl+Z)" icon={<Undo2 size={12} />}>
+                    <button onClick={undo} disabled={historyIndex === 0} style={iconOnlyBtnStyle}>
+                        <Undo2 size={14} />
+                    </button>
+                </Tooltip>
+                <Tooltip content="Redo (Ctrl+Y)" icon={<Redo2 size={12} />}>
+                    <button onClick={redo} disabled={historyIndex === history.length - 1} style={iconOnlyBtnStyle}>
+                        <Redo2 size={14} />
+                    </button>
+                </Tooltip>
             </div>
-            {/* Premium Tooltip */}
-            {historyPreviewId && (
-                <div style={{
-                    position: 'fixed',
-                    left: `${mousePos.x}px`,
-                    top: `${mousePos.y - 40}px`,
-                    transform: 'translateX(-50%)',
-                    backgroundColor: 'rgba(0, 0, 0, 0.85)',
-                    color: 'white',
-                    padding: '6px 12px',
-                    borderRadius: '6px',
-                    fontSize: '12px',
-                    fontWeight: '500',
-                    pointerEvents: 'none',
-                    zIndex: 10000,
-                    whiteSpace: 'nowrap',
-                    boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
-                    backdropFilter: 'blur(4px)',
-                    border: '1px solid rgba(255,255,255,0.1)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px',
-                    animation: 'fadeInUp 0.15s ease-out'
-                }}>
-                    <div style={{ color: '#ffcc00' }}>
-                        {getIconForAction(history.find(h => h.id === historyPreviewId)?.label || '')}
-                    </div>
-                    {history.find(h => h.id === historyPreviewId)?.label}
-                </div>
-            )}
         </div>
     );
 };

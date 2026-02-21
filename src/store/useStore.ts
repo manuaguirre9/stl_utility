@@ -28,7 +28,7 @@ export type HistoryAction =
     | { type: 'TEXTURIZE_HONEYCOMB', modelId: string, params: { type: 'honeycomb', cellSize: number, wallThickness: number, depth: number, angle: number, direction: 'inward' | 'outward', holeFillThreshold: number, holeFillEnabled: boolean }, selection: number[] }
     | { type: 'TEXTURIZE_FUZZY', modelId: string, params: { type: 'fuzzy', thickness: number, pointDistance: number, holeFillThreshold: number, holeFillEnabled: boolean }, selection: number[] }
     | { type: 'TEXTURIZE_DECIMATE', modelId: string, params: { reduction: number }, selection: number[] }
-    | { type: 'STITCH_REPAIR', modelId: string }
+    | { type: 'STITCH_REPAIR', modelId: string, params: { edgeMultiplier: number, holeDiameterMultiplier: number } }
     | { type: 'INITIAL' };
 
 interface HistoryEntry {
@@ -97,13 +97,13 @@ interface AppState {
         | { type: 'fuzzy', thickness: number, pointDistance: number, holeFillThreshold: number, holeFillEnabled: boolean }
         | { type: 'decimate', reduction: number }
     ) => void;
-    applyStitchRepair: (modelId: string) => void;
-    applyManifoldRepair: (modelId: string, options?: { edgeMultiplier?: number, holeDiameterMultiplier?: number }) => void;
+    applyManifoldRepair: (modelId: string, options?: import('../utils/manifoldRepairService').RepairOptions) => Promise<void>;
     selectAllFaces: (modelId: string) => void;
     boundaryEdges: { [modelId: string]: Float32Array | null };
+    nonManifoldEdges: { [modelId: string]: Float32Array | null };
     fillableEdges: { [modelId: string]: Float32Array | null };
     unfillableEdges: { [modelId: string]: Float32Array | null };
-    setBoundaryEdges: (modelId: string, positions: Float32Array | null) => void;
+    setBoundaryEdges: (modelId: string, openEdges: Float32Array | null, nonManifoldEdges: Float32Array | null) => void;
     setFillPreviewEdges: (modelId: string, fillable: Float32Array | null, unfillable: Float32Array | null) => void;
 }
 
@@ -151,6 +151,7 @@ export const useStore = create<AppState>((set, get) => ({
     showMesh: true,
     showEdges: true,
     boundaryEdges: {},
+    nonManifoldEdges: {},
     fillableEdges: {},
     unfillableEdges: {},
     showClassification: false,
@@ -199,6 +200,8 @@ export const useStore = create<AppState>((set, get) => ({
                 } else if (action.type === 'TEXTURIZE_DECIMATE') {
                     toolMode = 'texturize'; params = { ...action.params };
                     set({ textureType: 'decimate' });
+                } else if (action.type === 'STITCH_REPAIR') {
+                    toolMode = 'stitching'; params = { ...action.params };
                 }
 
                 if (toolMode) {
@@ -279,6 +282,13 @@ export const useStore = create<AppState>((set, get) => ({
                 const model = currentModels.find(m => m.id === action.modelId);
                 if (model) {
                     model.bufferGeometry = applyDecimate(model.bufferGeometry, action.selection, action.params);
+                    model.meshVersion++;
+                }
+            } else if (action.type === 'STITCH_REPAIR') {
+                const model = currentModels.find(m => m.id === action.modelId);
+                if (model) {
+                    const { repairWithManifold } = await import('../utils/manifoldRepairService');
+                    model.bufferGeometry = await repairWithManifold(model.bufferGeometry, action.params);
                     model.meshVersion++;
                 }
             }
@@ -362,6 +372,8 @@ export const useStore = create<AppState>((set, get) => ({
         } else if (action.type === 'TEXTURIZE_DECIMATE') {
             toolMode = 'texturize'; params = { ...action.params }; selection = action.selection; modelId = action.modelId;
             set({ textureType: 'decimate' });
+        } else if (action.type === 'STITCH_REPAIR') {
+            toolMode = 'stitching'; params = { ...action.params }; modelId = action.modelId;
         }
 
         if (toolMode && modelId) {
@@ -457,8 +469,8 @@ export const useStore = create<AppState>((set, get) => ({
                 } else if (action.type === 'STITCH_REPAIR') {
                     const model = currentModels.find(m => m.id === action.modelId);
                     if (model) {
-                        const { repairGeometry } = await import('../utils/meshRepairService');
-                        model.bufferGeometry = await repairGeometry(model.bufferGeometry);
+                        const { repairWithManifold } = await import('../utils/manifoldRepairService');
+                        model.bufferGeometry = await repairWithManifold(model.bufferGeometry, action.params);
                         model.meshVersion++;
                     }
                 }
@@ -663,54 +675,6 @@ export const useStore = create<AppState>((set, get) => ({
         }
     },
 
-    applyStitchRepair: async (modelId) => {
-        const { models, history, selectedHistoryIds, recalculateHistoryItem } = get();
-        const model = models.find((m) => m.id === modelId);
-        if (!model) return;
-
-        // If we are editing a past history item
-        if (selectedHistoryIds.length === 1 && selectedHistoryIds[0] !== 'initial') {
-            const histItem = history.find(h => h.id === selectedHistoryIds[0]);
-            if (histItem && histItem.action.type === 'STITCH_REPAIR') {
-                recalculateHistoryItem(histItem.id, {});
-                return;
-            }
-        }
-
-        const faceCount = model.bufferGeometry.attributes.position.count / 3;
-        set({ isProcessing: true, processingStatus: `Analyzing and repairing ${faceCount.toLocaleString()} faces...` });
-
-        try {
-            // Allow UI to paint overlay
-            await new Promise(resolve => setTimeout(resolve, 50));
-            const { repairGeometry } = await import('../utils/meshRepairService');
-
-            set({ processingStatus: 'Stitching vertices & closing holes...' });
-            const repairedGeo = await repairGeometry(model.bufferGeometry);
-
-            // IMPORTANT: Update the model FIRST, then record history.
-            // recordHistory snapshots current models, so the model must be
-            // updated before calling it, otherwise the snapshot contains the
-            // OLD (un-repaired) geometry.
-            const newModel = { ...model, bufferGeometry: repairedGeo, meshVersion: model.meshVersion + 1 };
-
-            set((state) => ({
-                models: state.models.map((m) => (m.id === modelId ? newModel : m)),
-                // Stay in stitching mode so user can see updated stats
-            }));
-
-            // Now record history — this captures the repaired model
-            get().recordHistory('Stitch Repair', { type: 'STITCH_REPAIR', modelId });
-        } catch (error) {
-            console.error("Stitch repair failed:", error);
-            alert("Repair failed. See console for details.");
-        } finally {
-            // Buffer to ensure React has finished rendering the last geometry update
-            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-            set({ isProcessing: false, processingStatus: '' });
-        }
-    },
-
 
     applyManifoldRepair: async (modelId, options) => {
         const model = get().models.find(m => m.id === modelId);
@@ -758,7 +722,14 @@ export const useStore = create<AppState>((set, get) => ({
                 smartSelection: { ...state.smartSelection, [modelId]: [] },
             }));
 
-            get().recordHistory('Manifold Repair', { type: 'STITCH_REPAIR', modelId });
+            get().recordHistory('Manifold Repair', {
+                type: 'STITCH_REPAIR',
+                modelId,
+                params: {
+                    edgeMultiplier: options?.edgeMultiplier ?? 3,
+                    holeDiameterMultiplier: options?.holeDiameterMultiplier ?? 10
+                }
+            });
         } catch (error) {
             console.error("Manifold repair failed:", error);
             const msg = error instanceof Error ? error.message : String(error);
@@ -777,8 +748,9 @@ export const useStore = create<AppState>((set, get) => ({
         get().setSmartSelection(modelId, allIndices);
     },
 
-    setBoundaryEdges: (modelId, positions) => set((state) => ({
-        boundaryEdges: { ...state.boundaryEdges, [modelId]: positions }
+    setBoundaryEdges: (modelId, oEdges, nmEdges) => set((state) => ({
+        boundaryEdges: { ...state.boundaryEdges, [modelId]: oEdges },
+        nonManifoldEdges: { ...state.nonManifoldEdges, [modelId]: nmEdges }
     })),
 
     setFillPreviewEdges: (modelId, fillable, unfillable) => set((state) => ({
