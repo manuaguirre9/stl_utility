@@ -95,6 +95,10 @@ export function subdivideSelectedFacesToSize(
     const MAX_STEPS = 6;
     for (let s = 0; s < MAX_STEPS; s++) {
         const triCount = currentPositions.length / 9;
+
+        // Safety cap: prevent browser crash if subdivision exceeds hardware limits.
+        if (triCount > 1000000) break;
+
         let needsMore = false;
 
         for (let i = 0; i < triCount; i++) {

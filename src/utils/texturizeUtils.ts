@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { getContiguousIslands, subdivideTriangles, fitCylinderToSelection } from './meshUtils';
 import { repairWithManifold } from './manifoldRepairService';
+import { simplex3 } from './math/simplexNoise';
 
 export type KnurlPattern = 'diamond' | 'straight' | 'diagonal' | 'square';
 
@@ -221,6 +222,56 @@ function isOnAnySegmentGrid(p: THREE.Vector3, grid: BoundaryGrid, eps: number = 
         }
     }
     return false;
+}
+
+/**
+ * Calculates the exact shortest distance from a point to any boundary segment in the grid.
+ * Useful for creating smooth falloffs (smoothstep) near selection borders to maintain manifoldness.
+ */
+function distanceToAnySegmentGrid(p: THREE.Vector3, grid: BoundaryGrid, searchRadius: number): number {
+    const { cellSize, cells } = grid;
+
+    // Check multiple cells within the search radius
+    const minX = Math.floor((p.x - searchRadius) / cellSize);
+    const maxX = Math.floor((p.x + searchRadius) / cellSize);
+    const minY = Math.floor((p.y - searchRadius) / cellSize);
+    const maxY = Math.floor((p.y + searchRadius) / cellSize);
+    const minZ = Math.floor((p.z - searchRadius) / cellSize);
+    const maxZ = Math.floor((p.z + searchRadius) / cellSize);
+
+    let minDistSq = Infinity;
+    const searchRadiusSq = searchRadius * searchRadius;
+
+    for (let x = minX; x <= maxX; x++) {
+        for (let y = minY; y <= maxY; y++) {
+            for (let z = minZ; z <= maxZ; z++) {
+                const segments = cells.get(`${x},${y},${z}`);
+                if (!segments) continue;
+
+                for (const seg of segments) {
+                    if (seg.lenSq < 1e-12) {
+                        const dSq = p.distanceToSquared(seg.a);
+                        if (dSq < minDistSq) minDistSq = dSq;
+                        continue;
+                    }
+
+                    _ap.subVectors(p, seg.a);
+                    const t = Math.max(0, Math.min(1, _ap.dot(seg.ab) / seg.lenSq));
+
+                    // Closest point on segment
+                    const projX = seg.a.x + t * seg.ab.x;
+                    const projY = seg.a.y + t * seg.ab.y;
+                    const projZ = seg.a.z + t * seg.ab.z;
+
+                    const dSq = (p.x - projX) ** 2 + (p.y - projY) ** 2 + (p.z - projZ) ** 2;
+                    if (dSq < minDistSq) minDistSq = dSq;
+                }
+            }
+        }
+    }
+
+    if (minDistSq > searchRadiusSq) return searchRadius;
+    return Math.sqrt(minDistSq);
 }
 
 // --------------------------------------------------------------------------------
@@ -460,7 +511,10 @@ export async function applyKnurling(
                                     const pBase = new THREE.Vector3().addScaledVector(triVecs[0], w.wA).addScaledVector(triVecs[1], w.wB).addScaledVector(triVecs[2], w.wC);
                                     const p0_u = proj.fromRot(p.u, p.v);
                                     const norm = proj.getNormal(p0_u.u, p0_u.v);
-                                    const vFinal = pBase.addScaledVector(norm, (p as any).h || 0);
+
+                                    // Safety: If the calculated normal is invalid, skip displacement
+                                    const appliedH = (isNaN(norm.x) || isNaN(norm.y) || isNaN(norm.z)) ? 0 : ((p as any).h || 0);
+                                    const vFinal = pBase.addScaledVector(norm, appliedH);
 
                                     const vIdx = getVertIndex(vFinal.x, vFinal.y, vFinal.z);
 
@@ -473,6 +527,15 @@ export async function applyKnurling(
                                         tempTri[pIdx] = vIdx;
                                     }
                                 });
+
+                                // Robustness: Skip degenerate triangles in inner pattern
+                                const p0x = vertices[tempTri[0] * 3], p0y = vertices[tempTri[0] * 3 + 1], p0z = vertices[tempTri[0] * 3 + 2];
+                                const p1x = vertices[tempTri[1] * 3], p1y = vertices[tempTri[1] * 3 + 1], p1z = vertices[tempTri[1] * 3 + 2];
+                                const p2x = vertices[tempTri[2] * 3], p2y = vertices[tempTri[2] * 3 + 1], p2z = vertices[tempTri[2] * 3 + 2];
+                                const cpX = (p1y - p0y) * (p2z - p0z) - (p1z - p0z) * (p2y - p0y);
+                                const cpY = (p1z - p0z) * (p2x - p0x) - (p1x - p0x) * (p2z - p0z);
+                                const cpZ = (p1x - p0x) * (p2y - p0y) - (p1y - p0y) * (p2x - p0x);
+                                if (cpX * cpX + cpY * cpY + cpZ * cpZ < 1e-12) continue;
 
                                 if (proj.depthSign < 0) {
                                     newIndices.push(tempTri[2], tempTri[1], tempTri[0]);
@@ -515,8 +578,26 @@ export async function applyKnurling(
 
                                     // For manifoldness, the wall base must be (BaseB, BaseA) 
                                     // because the selection face uses (BaseA, BaseB).
-                                    newIndices.push(idxBaseB, idxBaseA, idxExtA);
-                                    newIndices.push(idxBaseB, idxExtA, idxExtB);
+                                    // Tri 1: BaseB, BaseA, ExtA
+                                    const pBx = vertices[idxBaseB * 3], pBy = vertices[idxBaseB * 3 + 1], pBz = vertices[idxBaseB * 3 + 2];
+                                    const pAx = vertices[idxBaseA * 3], pAy = vertices[idxBaseA * 3 + 1], pAz = vertices[idxBaseA * 3 + 2];
+                                    const pEx = vertices[idxExtA * 3], pEy = vertices[idxExtA * 3 + 1], pEz = vertices[idxExtA * 3 + 2];
+                                    const cpX1 = (pAx - pBx) * (pEz - pBz) - (pAz - pBz) * (pEy - pBy);
+                                    const cpY1 = (pAz - pBz) * (pEx - pBx) - (pAx - pBx) * (pEz - pBz);
+                                    const cpZ1 = (pAx - pBx) * (pEy - pBy) - (pAy - pBy) * (pEx - pBx);
+                                    if (cpX1 * cpX1 + cpY1 * cpY1 + cpZ1 * cpZ1 > 1e-12) {
+                                        newIndices.push(idxBaseB, idxBaseA, idxExtA);
+                                    }
+
+                                    // Tri 2: BaseB, ExtA, ExtB
+                                    const pEbX = vertices[idxExtB * 3], pEbY = vertices[idxExtB * 3 + 1], pEbZ = vertices[idxExtB * 3 + 2];
+                                    const cpX2 = (pEx - pBx) * (pEbZ - pBz) - (pEz - pBz) * (pEbY - pBy);
+                                    const cpY2 = (pEz - pBz) * (pEbX - pBx) - (pEx - pBx) * (pEbZ - pBz);
+                                    const cpZ2 = (pEx - pBx) * (pEbY - pBy) - (pEy - pBy) * (pEbX - pBx);
+                                    if (cpX2 * cpX2 + cpY2 * cpY2 + cpZ2 * cpZ2 > 1e-12) {
+                                        newIndices.push(idxBaseB, idxExtA, idxExtB);
+                                    }
+
                                     wallCount++;
                                 }
                             }
@@ -723,7 +804,9 @@ export async function applyHoneycomb(
                                     const pBase = new THREE.Vector3().addScaledVector(triVecs[0], w.wA).addScaledVector(triVecs[1], w.wB).addScaledVector(triVecs[2], w.wC);
                                     const p0_u = proj.fromRot(p.u, p.v);
                                     const norm = proj.getNormal(p0_u.u, p0_u.v);
-                                    const vFinal = pBase.addScaledVector(norm, (p as any).h || 0);
+
+                                    const appliedH = (isNaN(norm.x) || isNaN(norm.y) || isNaN(norm.z)) ? 0 : ((p as any).h || 0);
+                                    const vFinal = pBase.addScaledVector(norm, appliedH);
 
                                     const vIdx = getVertIndex(vFinal.x, vFinal.y, vFinal.z);
 
@@ -735,6 +818,15 @@ export async function applyHoneycomb(
                                         tempTri[pIdx] = vIdx;
                                     }
                                 });
+
+                                // Robustness: Skip degenerate triangles in inner pattern
+                                const p0x = vertices[tempTri[0] * 3], p0y = vertices[tempTri[0] * 3 + 1], p0z = vertices[tempTri[0] * 3 + 2];
+                                const p1x = vertices[tempTri[1] * 3], p1y = vertices[tempTri[1] * 3 + 1], p1z = vertices[tempTri[1] * 3 + 2];
+                                const p2x = vertices[tempTri[2] * 3], p2y = vertices[tempTri[2] * 3 + 1], p2z = vertices[tempTri[2] * 3 + 2];
+                                const cpX = (p1y - p0y) * (p2z - p0z) - (p1z - p0z) * (p2y - p0y);
+                                const cpY = (p1z - p0z) * (p2x - p0x) - (p1x - p0x) * (p2z - p0z);
+                                const cpZ = (p1x - p0x) * (p2y - p0y) - (p1y - p0y) * (p2x - p0x);
+                                if (cpX * cpX + cpY * cpY + cpZ * cpZ < 1e-12) continue;
 
                                 if (proj.depthSign < 0) {
                                     newIndices.push(tempTri[2], tempTri[1], tempTri[0]);
@@ -781,10 +873,26 @@ export async function applyHoneycomb(
                                     const idxExtA = getVertIndex(vExtA.x, vExtA.y, vExtA.z);
                                     const idxExtB = getVertIndex(vExtB.x, vExtB.y, vExtB.z);
 
-                                    // For manifoldness, the wall base must be (BaseB, BaseA) 
-                                    // because the selection face uses (BaseA, BaseB).
-                                    newIndices.push(idxBaseB, idxBaseA, idxExtA);
-                                    newIndices.push(idxBaseB, idxExtA, idxExtB);
+                                    // FaceB, FaceA, ExtA
+                                    const pBx = vertices[idxBaseB * 3], pBy = vertices[idxBaseB * 3 + 1], pBz = vertices[idxBaseB * 3 + 2];
+                                    const pAx = vertices[idxBaseA * 3], pAy = vertices[idxBaseA * 3 + 1], pAz = vertices[idxBaseA * 3 + 2];
+                                    const pEx = vertices[idxExtA * 3], pEy = vertices[idxExtA * 3 + 1], pEz = vertices[idxExtA * 3 + 2];
+                                    const cpX1 = (pAx - pBx) * (pEz - pBz) - (pAz - pBz) * (pEy - pBy);
+                                    const cpY1 = (pAz - pBz) * (pEx - pBx) - (pAx - pBx) * (pEz - pBz);
+                                    const cpZ1 = (pAx - pBx) * (pEy - pBy) - (pAy - pBy) * (pEx - pBx);
+                                    if (cpX1 * cpX1 + cpY1 * cpY1 + cpZ1 * cpZ1 > 1e-12) {
+                                        newIndices.push(idxBaseB, idxBaseA, idxExtA);
+                                    }
+
+                                    // FaceB, ExtA, ExtB
+                                    const pEbX = vertices[idxExtB * 3], pEbY = vertices[idxExtB * 3 + 1], pEbZ = vertices[idxExtB * 3 + 2];
+                                    const cpX2 = (pEx - pBx) * (pEbZ - pBz) - (pEz - pBz) * (pEbY - pBy);
+                                    const cpY2 = (pEz - pBz) * (pEbX - pBx) - (pEx - pBx) * (pEbZ - pBz);
+                                    const cpZ2 = (pEx - pBx) * (pEbY - pBy) - (pEy - pBy) * (pEbX - pBx);
+                                    if (cpX2 * cpX2 + cpY2 * cpY2 + cpZ2 * cpZ2 > 1e-12) {
+                                        newIndices.push(idxBaseB, idxExtA, idxExtB);
+                                    }
+
                                     wallCount++;
                                 }
                             }
@@ -871,8 +979,9 @@ export async function applyFuzzySkin(
         // 1. Homogeneous Density Calculation
         let currentSubPos: Float32Array<ArrayBufferLike> = islandPos;
         // Cap the point distance to avoid infinite/crashing subdivisions
-        const effectivePtDist = Math.max(0.1, params.pointDistance);
-        const targetSq = effectivePtDist * effectivePtDist;
+        // Increased from 0.1 to 0.2 to prevent polygon explosion on large surfaces.
+        const effectivePtDist = Math.max(0.2, params.pointDistance);
+        const targetSq = (effectivePtDist * 1.5) * (effectivePtDist * 1.5); // Allow slightly larger triangles for Simplex
         const MAX_STEPS = 6;
 
         for (let s = 0; s < MAX_STEPS; s++) {
@@ -904,22 +1013,54 @@ export async function applyFuzzySkin(
         const positions = subGeo.attributes.position.array as any as Float32Array;
         const normals = subGeo.attributes.normal.array as any as Float32Array;
 
-        // 3. Application of Noise (Random Displacement) with Boundary Clamp
+        // 3. Application of Coherent Noise (Simplex) with Smooth Boundary Falloff
+        // A frequency derived from pointDistance creates appropriately sized "grains"
+        const freqXY = 1.0 / params.pointDistance;
+        // Stretch the Z frequency slightly to create the characteristic "vertical bark" look of 3D printed fuzzy skin
+        const freqZ = freqXY * 0.5;
+
         for (let i = 0; i < positions.length / 3; i++) {
-            let noise = (Math.random() - 0.5) * 2 * params.thickness;
             const px = positions[i * 3], py = positions[i * 3 + 1], pz = positions[i * 3 + 2];
             const p = new THREE.Vector3(px, py, pz);
 
-            // Check border collision using the high-performance Spatial Hash grid.
-            // If the point is within the `clampDist` distance of a boundary, we apply 0 noise
-            // so the generated geometry remains perfectly flush and manifold with the rest of the model.
-            if (isOnAnySegmentGrid(p, islandBoundaryGrid, clampDist)) {
-                noise = 0;
+            // 1. Isolate the 2D Normal (Slicer Kinematics)
+            const nx = normals[i * 3], ny = normals[i * 3 + 1], nz = normals[i * 3 + 2];
+            if (isNaN(nx) || isNaN(ny) || isNaN(nz)) continue;
+
+            const nxy = new THREE.Vector2(nx, ny);
+            const nxyLenSq = nxy.lengthSq();
+
+            // If the surface is completely flat (top/bottom skin), the XY normal is 0. 
+            // In a slicer, fuzzy skin NEVER applies to solid horizontal top/bottom layers.
+            if (nxyLenSq < 1e-12) continue; // Skip displacement entirely for flat Z surfaces
+
+            nxy.normalize(); // Now we have a pure perpendicular vector pointing OUT from the wall in 2D space
+
+            if (isNaN(nxy.x) || isNaN(nxy.y)) continue; // Extra safety net
+
+            // 2. Evaluate Layer-Based Jitter Noise
+            // We use the absolute world coordinates. Cylinder/Cone stretching no longer matters
+            // because the jitter is applied independently for every point along the perimeter anyway.
+            let noise = simplex3(px * freqXY, py * freqXY, pz * freqZ) * params.thickness;
+            if (isNaN(noise)) noise = 0;
+
+            // 3. Smoothstep boundary falloff to guarantee watertightness 
+            const distToBorder = distanceToAnySegmentGrid(p, islandBoundaryGrid, clampDist);
+
+            if (distToBorder < clampDist) {
+                // Smoothstep formula: 3x^2 - 2x^3 where x is normalized [0, 1]
+                const x = Math.max(0, Math.min(1, distToBorder / clampDist));
+                const falloff = x * x * (3 - 2 * x);
+                noise *= falloff;
             }
 
-            positions[i * 3] += normals[i * 3] * noise;
-            positions[i * 3 + 1] += normals[i * 3 + 1] * noise;
-            positions[i * 3 + 2] += normals[i * 3 + 2] * noise;
+            // 4. Apply 2D XY Displacement Only (Z remains pristine)
+            // Double check that we are not adding NaNs to the actual Float32Array
+            if (!isNaN(positions[i * 3]) && !isNaN(positions[i * 3 + 1])) {
+                positions[i * 3] += nxy.x * noise;
+                positions[i * 3 + 1] += nxy.y * noise;
+                // positions[i * 3 + 2] += 0 (Z is untouched, exactly like a real 3D printer)
+            }
         }
 
         // 4. Conversion to final indexed geometry
@@ -932,6 +1073,23 @@ export async function applyFuzzySkin(
             const px0 = finalIslandPos[i0], py0 = finalIslandPos[i0 + 1], pz0 = finalIslandPos[i0 + 2];
             const px1 = finalIslandPos[i1], py1 = finalIslandPos[i1 + 1], pz1 = finalIslandPos[i1 + 2];
             const px2 = finalIslandPos[i2], py2 = finalIslandPos[i2 + 1], pz2 = finalIslandPos[i2 + 2];
+
+            // Robust NaN check before cross product
+            if (isNaN(px0) || isNaN(py0) || isNaN(pz0) || isNaN(px1) || isNaN(py1) || isNaN(pz1) || isNaN(px2) || isNaN(py2) || isNaN(pz2)) {
+                continue;
+            }
+
+            // Robustness: Detect and skip degenerate (zero-area) triangles.
+            // A triangle is degenerate if its vertices are collinear or coincident.
+            const d1x = px1 - px0, d1y = py1 - py0, d1z = pz1 - pz0;
+            const d2x = px2 - px0, d2y = py2 - py0, d2z = pz2 - pz0;
+            // Cross product magnitude squared
+            const cpX = d1y * d2z - d1z * d2y;
+            const cpY = d1z * d2x - d1x * d2z;
+            const cpZ = d1x * d2y - d1y * d2x;
+            const areaSq = cpX * cpX + cpY * cpY + cpZ * cpZ;
+
+            if (areaSq < 1e-12) continue;
 
             newIndices.push(
                 getVertIndex(px0, py0, pz0),

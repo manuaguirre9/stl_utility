@@ -1,108 +1,61 @@
 
 import * as THREE from 'three';
 
-// Heuristic to build adjacency graph for non-indexed geometry (STL usually is non-indexed)
-// Returns array: faceIndex -> array of neighbor faceIndices (Shared Edge)
+// Optimization: O(N) edge-based adjacency build.
+// Instead of O(N^2) face pairs per vertex, we hash each of the 3 edges of a face.
+// If two faces share an edge hash, they are neighbors.
 export const buildAdjacencyGraph = (geometry: THREE.BufferGeometry, precision = 1e-3) => {
     const position = geometry.attributes.position;
     const index = geometry.index;
     const faceCount = index ? index.count / 3 : position.count / 3;
 
-    // 1. Hash to cluster coincident vertices
-    const vertexToFaces = new Map<string, number[]>();
-
-    const hash = (x: number, y: number, z: number) => {
-        const ix = Math.round(x / precision);
-        const iy = Math.round(y / precision);
-        const iz = Math.round(z / precision);
-        return `${ix},${iy},${iz}`;
+    const vKey = (idx: number) => {
+        const x = Math.round(position.getX(idx) / precision);
+        const y = Math.round(position.getY(idx) / precision);
+        const z = Math.round(position.getZ(idx) / precision);
+        return `${x},${y},${z}`;
     };
 
+    // Map: edgeKey -> [faceIdx1, faceIdx2, ...]
+    const edgeToFaces = new Map<string, number[]>();
+
     for (let f = 0; f < faceCount; f++) {
-        for (let v = 0; v < 3; v++) {
-            const vIdx = index ? index.getX(f * 3 + v) : f * 3 + v;
-            const h = hash(position.getX(vIdx), position.getY(vIdx), position.getZ(vIdx));
-            let faces = vertexToFaces.get(h);
-            if (!faces) {
-                faces = [];
-                vertexToFaces.set(h, faces);
+        const i0 = index ? index.getX(f * 3 + 0) : f * 3 + 0;
+        const i1 = index ? index.getX(f * 3 + 1) : f * 3 + 1;
+        const i2 = index ? index.getX(f * 3 + 2) : f * 3 + 2;
+
+        const k0 = vKey(i0), k1 = vKey(i1), k2 = vKey(i2);
+
+        // Face has 3 edges: (k0,k1), (k1,k2), (k2,k0)
+        const edges = [
+            k0 < k1 ? `${k0}|${k1}` : `${k1}|${k0}`,
+            k1 < k2 ? `${k1}|${k2}` : `${k2}|${k1}`,
+            k2 < k0 ? `${k2}|${k0}` : `${k0}|${k2}`
+        ];
+
+        for (const edge of edges) {
+            let list = edgeToFaces.get(edge);
+            if (!list) {
+                list = [];
+                edgeToFaces.set(edge, list);
             }
-            faces.push(f);
+            list.push(f);
         }
     }
 
-    // 2. Build explicit edge pairs for faces sharing AT LEAST ONE vertex
-    // We expect roughly 3 edges per face. Pre-allocate array to avoid GC/Memory pressure.
-    // Instead of Map strings which hits V8's 16.7M limit, we use a flat Int32Array [faceA, faceB, faceA, faceB...]
-    // We overestimate capacity slightly.
-    let edgeCapacity = faceCount * 12;
-    let edges = new Int32Array(edgeCapacity);
-    let edgePtr = 0;
-
-    for (const faces of vertexToFaces.values()) {
-        const len = faces.length;
-        if (len < 2) continue;
-        for (let i = 0; i < len; i++) {
-            for (let j = i + 1; j < len; j++) {
-                let a = faces[i];
-                let b = faces[j];
-                if (a === b) continue;
-                if (a > b) { const t = a; a = b; b = t; } // Enforce a < b
-
-                if (edgePtr + 2 > edges.length) {
-                    const expanded = new Int32Array(edges.length * 2);
-                    expanded.set(edges);
-                    edges = expanded;
-                }
-                edges[edgePtr++] = a;
-                edges[edgePtr++] = b;
-            }
-        }
-    }
-
-    // 3. Compact and pack edges into BigUint64Array for fast native sorting
-    // We pack (FaceA << 32) | FaceB. Since Face indices are < 4B, they fit in 32bits.
-    const pairCount = edgePtr / 2;
-    const packedEdges = new BigUint64Array(pairCount);
-    for (let i = 0; i < pairCount; i++) {
-        const a = BigInt(edges[i * 2]);
-        const b = BigInt(edges[i * 2 + 1]);
-        packedEdges[i] = (a << 32n) | b;
-    }
-
-    // Free the Int32Array to help the Garbage Collector
-    edges = new Int32Array(0);
-
-    // 4. Sort the packed array. Identical edge pairs will sit adjacent to each other.
-    packedEdges.sort();
-
-    // 5. Scan sorted array to find pairs that appear 2 or more times (meaning they share 2 vertices = an Edge)
     const adjacency: number[][] = Array.from({ length: faceCount }, () => []);
 
-    if (pairCount > 0) {
-        let currentPair = packedEdges[0];
-        let runLength = 1;
-
-        for (let i = 1; i < pairCount; i++) {
-            if (packedEdges[i] === currentPair) {
-                runLength++;
-            } else {
-                if (runLength >= 2) {
-                    const a = Number(currentPair >> 32n);
-                    const b = Number(currentPair & 0xFFFFFFFFn);
-                    adjacency[a].push(b);
-                    adjacency[b].push(a);
-                }
-                currentPair = packedEdges[i];
-                runLength = 1;
+    for (const neighbors of edgeToFaces.values()) {
+        if (neighbors.length < 2) continue;
+        // Typically length is 2 for a manifold edge.
+        // If it's > 2, it's non-manifold, but we still link them for selection purposes.
+        for (let i = 0; i < neighbors.length; i++) {
+            for (let j = i + 1; j < neighbors.length; j++) {
+                const a = neighbors[i];
+                const b = neighbors[j];
+                adjacency[a].push(b);
+                adjacency[b].push(a);
             }
-        }
-        // Check last run
-        if (runLength >= 2) {
-            const a = Number(currentPair >> 32n);
-            const b = Number(currentPair & 0xFFFFFFFFn);
-            adjacency[a].push(b);
-            adjacency[b].push(a);
         }
     }
 

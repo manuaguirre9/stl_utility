@@ -786,6 +786,22 @@ export const ScenePanel: React.FC<ScenePanelProps> = ({ onClose }) => {
                                                         style={{ width: '100%', accentColor: 'var(--accent-primary)' }}
                                                     />
                                                     <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px', fontStyle: 'italic' }}>Lower values = Higher resolution noise</div>
+
+                                                    <div style={{
+                                                        marginTop: '12px',
+                                                        padding: '8px',
+                                                        backgroundColor: 'rgba(255, 165, 0, 0.1)',
+                                                        borderRadius: '4px',
+                                                        border: '1px solid rgba(255, 165, 0, 0.3)',
+                                                        display: 'flex',
+                                                        gap: '8px',
+                                                        alignItems: 'flex-start'
+                                                    }}>
+                                                        <Zap size={12} style={{ color: '#ffa500', marginTop: '2px', flexShrink: 0 }} />
+                                                        <p style={{ fontSize: '10px', color: '#ffa500', margin: 0, lineHeight: '1.3' }}>
+                                                            <strong>Note:</strong> High resolution noise (low density) significantly increases triangle count, which will result in larger file sizes and may affect real-time performance.
+                                                        </p>
+                                                    </div>
                                                 </div>
                                             </>
                                         )}
