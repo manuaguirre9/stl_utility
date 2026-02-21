@@ -301,8 +301,7 @@ export async function applyKnurling(
     faceIndices: number[],
     params: KnurlingParams
 ): Promise<THREE.BufferGeometry> {
-    const proj = createProjectionData(geometry, faceIndices, params.angle);
-    if (!proj) return geometry;
+    if (!faceIndices || faceIndices.length === 0) return geometry;
 
     const index = geometry.index;
     const posAttr = geometry.attributes.position;
@@ -341,10 +340,11 @@ export async function applyKnurling(
             islandPos[i * 9 + 6] = posAttr.getX(i2); islandPos[i * 9 + 7] = posAttr.getY(i2); islandPos[i * 9 + 8] = posAttr.getZ(i2);
         });
         // STEP 1: Subdivide selection islands
-        // We subdivide the original triangles in the selection twice
-        // to provide enough geometric resolution for the knurling peaks and valleys.
         const subPos = subdivideTriangles(islandPos, 2);
         const subCount = subPos.length / 9;
+
+        const proj = createProjectionData(geometry, islandIndices, params.angle);
+        if (!proj) return;
 
         // Calculate pitch variables based on whether the geometry is planar or cylindrical
         const nD_nom = Math.round(proj.circPhys / params.pitch);
@@ -353,8 +353,9 @@ export async function applyKnurling(
 
         // Define rotation angle transformation for the UV grid mapping
         const angRad = (params.angle * Math.PI) / 180;
-        const factor = Math.cos(angRad) + Math.sin(angRad);
-        const pU = pitchP * factor, pV = pitchP * factor;
+        const factor = Math.abs(Math.cos(angRad)) + Math.abs(Math.sin(angRad));
+        const pU = pitchP * factor > 0.01 ? pitchP * factor : pitchP;
+        const pV = pitchP * factor > 0.01 ? pitchP * factor : pitchP;
 
         // Line intersection logic for Sutherland-Hodgman Polygon Clipping
         // This cuts overlapping 2D texture polygons strictly to the bounds of the original 3D triangles
@@ -548,23 +549,7 @@ export async function applyHoneycomb(
     faceIndices: number[],
     params: HoneycombParams
 ): Promise<THREE.BufferGeometry> {
-    const proj = createProjectionData(geometry, faceIndices, params.angle);
-    if (!proj) return geometry;
-
-    let { cellSize: W, wallThickness: t, depth, direction, angle: userAngle } = params;
-
-    if (!proj.isPlanar && proj.circPhys > 0) {
-        const ang = ((userAngle % 180) + 180) % 180;
-        const symmetries = [0, 30, 60, 90, 120, 150, 180];
-        const bestSym = symmetries.reduce((p, c) => Math.abs(c - ang) < Math.abs(p - ang) ? c : p);
-        const periodFactor = (bestSym % 60 === 0) ? 1.0 : Math.sqrt(3);
-        const nUnits = Math.round(proj.circPhys / (W * periodFactor));
-        W = proj.circPhys / (Math.max(1, nUnits) * periodFactor);
-    }
-
-    const appliedDepth = direction === 'inward' ? -depth : depth;
-    const s = (W / 2) / (Math.sqrt(3) / 2); // Side length
-    const H = 1.5 * s; // Vertical distance between rows
+    if (!faceIndices || faceIndices.length === 0) return geometry;
 
     const index = geometry.index;
     const posAttr = geometry.attributes.position;
@@ -604,6 +589,24 @@ export async function applyHoneycomb(
         });
         const subPos = subdivideTriangles(islandPos, 2);
         const subCount = subPos.length / 9;
+
+        const proj = createProjectionData(geometry, islandIndices, params.angle);
+        if (!proj) return;
+
+        let { cellSize: W, wallThickness: t, depth, direction, angle: userAngle } = params;
+
+        if (!proj.isPlanar && proj.circPhys > 0) {
+            const ang = ((userAngle % 180) + 180) % 180;
+            const symmetries = [0, 30, 60, 90, 120, 150, 180];
+            const bestSym = symmetries.reduce((p, c) => Math.abs(c - ang) < Math.abs(p - ang) ? c : p);
+            const periodFactor = (bestSym % 60 === 0) ? 1.0 : Math.sqrt(3);
+            const nUnits = Math.round(proj.circPhys / (W * periodFactor));
+            W = proj.circPhys / (Math.max(1, nUnits) * periodFactor);
+        }
+
+        const appliedDepth = direction === 'inward' ? -depth : depth;
+        const s = (W / 2) / (Math.sqrt(3) / 2); // Side length
+        const H = 1.5 * s; // Vertical distance between rows
 
         const intersect = (a: any, b: any, e1: any, e2: any) => {
             const da = (e2.u - e1.u) * (a.v - e1.v) - (e2.v - e1.v) * (a.u - e1.u), db = (e2.u - e1.u) * (b.v - e1.v) - (e2.v - e1.v) * (b.u - e1.u);
